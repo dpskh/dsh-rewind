@@ -39,7 +39,7 @@ The fold needs a marker: mount both plugins so `rewind` can collapse the explora
 
 ## Model Experience
 
-Directly: the `rewind` tool call and its fold result. The replacement report message is model-visible from the next request on; the exploration's durable events stay in the log but out of the model-visible surface.
+Directly: the `rewind` tool call and its fold result. The replacement report message is model-visible from the next request on; the exploration's durable events stay in the log but out of the model-visible surface. A `tool:rewind` system-prompt section makes fold discipline a standing instruction (rewind immediately after the marked exploration, before unrelated work).
 
 #### KV Cache effect
 

@@ -97,6 +97,7 @@ async function setup(
 ): Promise<{ ctx: Context; adapter: ScriptedAdapter }> {
   const ctx = new Context()
   await ctx.plugin(LlmService)
+  await ctx.plugin(SystemPrompt)
   const adapter = new ScriptedAdapter(chunks)
   ctx.llm.registerAdapter([MODEL, 'other'], adapter)
   // Partial is fine at the mount boundary: the plugin Config schema applies
@@ -531,6 +532,14 @@ describe('rewind tool', () => {
     expect(rendered).toEqual([{ type: 'text', text: 'Folded 2 surface nodes (seq 5..6) into an auto-generated report.' }])
     const single = def.output.render({}, { checkpointSeq: 1, foldedNodes: 1, start: 2, end: 2 })
     expect(single).toEqual([{ type: 'text', text: 'Folded 1 surface node (seq 2..2) into an auto-generated report.' }])
+  })
+
+  it('registers the fold-discipline prompt section', async () => {
+    const ctx = await setupTools(textChunks('report'))
+    const assembly = await ctx.systemPrompt.assemble()
+    const section = assembly.sections.find(s => s.name === 'tool:rewind')
+    expect(section?.text).toContain('MUST call `rewind` immediately')
+    expect(section?.text).toContain('Without a preceding `checkpoint` mark it errors')
   })
 
   it('rejects a call without an owning agent session', async () => {
