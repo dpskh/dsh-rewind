@@ -68,7 +68,7 @@ describe('rewind fold invariants', () => {
   it('ignores unrelated session events', async () => {
     const ctx = await setup()
     expect(() => {
-      ctx.emit('session/event', {} as Session, event('turn/start', { turn: 1, trigger: { kind: 'retry' } }))
+      ctx.emit('session/event', {} as Session, event('turn/start', { turn: 1 }))
       ctx.emit('session/event', {} as Session, event('checkpoint/mark', { turn: 1 }))
     }).not.toThrow()
   })

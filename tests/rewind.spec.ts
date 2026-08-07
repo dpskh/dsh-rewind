@@ -44,7 +44,7 @@ function toolCallMessage(callId: string, name: string) {
  */
 function explorationSession(): Session {
   const session = Session.create(SessionId('explore'))
-  session.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
+  session.append('turn/start', { turn: 1 })
   session.append('user/message', createUserMessage({
     content: [{ type: 'text', text: 'Find the cause' }],
     source: { kind: 'user' },
@@ -138,7 +138,7 @@ describe('region selection', () => {
   it('rejects a fold with nothing between the mark and the rewind call', () => {
     // Build a fresh session where the mark lands right before the rewind call.
     const tight = Session.create(SessionId('tight'))
-    tight.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
+    tight.append('turn/start', { turn: 1 })
     tight.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'Find the cause' }],
       source: { kind: 'user' },
@@ -151,7 +151,7 @@ describe('region selection', () => {
 
   it('rejects an unbalanced region whose open tool call never resolves', () => {
     const session = Session.create(SessionId('unbalanced'))
-    session.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
+    session.append('turn/start', { turn: 1 })
     session.append('checkpoint/mark', { turn: 1 })
     session.append('assistant/message', { turn: 1, step: 1, message: toolCallMessage('c1', 'bash') }, { surfaceOp: 'append' })
     session.append('assistant/message', { turn: 1, step: 2, message: toolCallMessage('c2', 'rewind') }, { surfaceOp: 'append' })
@@ -161,7 +161,7 @@ describe('region selection', () => {
 
   it('rejects a region whose start would split a tool-call/result pair', () => {
     const session = Session.create(SessionId('splitstart'))
-    session.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
+    session.append('turn/start', { turn: 1 })
     session.append('checkpoint/mark', { turn: 1 })
     // The assistant requests TWO calls; only the first resolves before the
     // second mark, so the region after it starts at an unmatched result.
@@ -213,7 +213,7 @@ describe('region selection', () => {
   it('tracks the open turn across boundaries', () => {
     const session = Session.create(SessionId('turns'))
     expect(openTurnOf(session.events)).toBeNull()
-    session.append('turn/start', { turn: 7, trigger: { kind: 'message', source: { kind: 'user' } } })
+    session.append('turn/start', { turn: 7 })
     expect(openTurnOf(session.events)).toBe(7)
     session.append('turn/end', { turn: 7, reason: { kind: 'completed' } })
     expect(openTurnOf(session.events)).toBeNull()
@@ -317,7 +317,7 @@ describe('rewind service', () => {
   it('rejects a summary that is not smaller than the folded region', async () => {
     const { ctx } = await setup(textChunks('x'.repeat(200)))
     const session = Session.create(SessionId('shrink'))
-    session.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
+    session.append('turn/start', { turn: 1 })
     session.append('checkpoint/mark', { turn: 1 })
     session.append('assistant/message', {
       turn: 1, step: 1,
@@ -334,7 +334,7 @@ describe('rewind service', () => {
   it('skips empty-content assistant nodes when building the summarization input', async () => {
     const { ctx } = await setup(textChunks('report'))
     const session = Session.create(SessionId('emptyassistant'))
-    session.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
+    session.append('turn/start', { turn: 1 })
     session.append('checkpoint/mark', { turn: 1 })
     // An empty-content assistant/message derives to no LLM message (it only
     // hosts a max-tokens step's usage), so the summarization input skips it.
@@ -350,7 +350,7 @@ describe('rewind service', () => {
   it('skips the shrink check when the folded region carries no text', async () => {
     const { ctx } = await setup(textChunks('report'))
     const session = Session.create(SessionId('toolonly'))
-    session.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
+    session.append('turn/start', { turn: 1 })
     session.append('checkpoint/mark', { turn: 1 })
     session.append('assistant/message', { turn: 1, step: 1, message: toolCallMessage('c1', 'bash') }, { surfaceOp: 'append' })
     session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: CallId('c1'), content: [], isError: false }) }, { surfaceOp: 'append' })
