@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-One package, one entry plugin. Mounting `@dpskh/tool-rewind` provides `ctx.rewind` (a service that folds everything since the most recent `checkpoint/mark` into an auto-generated report) and the model-facing `rewind` tool over it. The fold shadows the exploration's surface range with the report — the same `surfaceOp: { op: 'replace' }` mechanism the [compaction seam](../../compact/README.md) uses — so subsequent requests no longer carry the exploration's intermediate steps (reads, searches, experiments), while the durable log keeps the full exploration for audit. The report is produced by `ctx.llm` (auto-generated); the marker comes from the sibling [`@dpskh/tool-checkpoint`](../tool-checkpoint/README.md) plugin. No upstream package is modified.
+One package, one entry plugin. Mounting `@dpskh/tool-rewind` provides `ctx.rewind` (a service that folds everything since the most recent `checkpoint/mark` into an auto-generated report) and the model-facing `rewind` tool over it. The fold shadows the exploration's surface range with the report — the same `surfaceOp: { op: 'replace' }` mechanism the DeepSeek Harness compaction seam uses — so subsequent requests no longer carry the exploration's intermediate steps (reads, searches, experiments), while the durable log keeps the full exploration for audit. The report is produced by `ctx.llm` (auto-generated); the marker comes from the sibling [`@dpskh/tool-checkpoint`](https://github.com/dsh-external/dsh-checkpoint) plugin. No upstream package is modified.
 
 ## Configuration
 
@@ -18,6 +18,19 @@ One package, one entry plugin. Mounting `@dpskh/tool-rewind` provides `ctx.rewin
 ```
 
 Provider/model resolution order for the report call: configured overrides, then the session's last routed `request/header` config, then the agent's options. Missing all three fails loud.
+
+## Working together
+
+The fold needs a marker: mount both plugins so `rewind` can collapse the exploration anchored by a `checkpoint`. `rewind` alone has nothing to fold and fails with a no-checkpoint error; `checkpoint` alone records inert markers.
+
+```yaml
+- id: tool-checkpoint
+  name: '@dpskh/tool-checkpoint'    # https://github.com/dsh-external/dsh-checkpoint
+- id: tool-rewind
+  name: '@dpskh/tool-rewind'
+  config:
+    reportLanguage: en              # en | zh report instruction language
+```
 
 ## Contract
 

@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-一个包、一个入口插件。挂载 `@dpskh/tool-rewind` 提供 `ctx.rewind`（把最近一次 `checkpoint/mark` 之后的一切折叠成自动生成报告的服务）和基于它的模型侧 `rewind` 工具。折叠用报告遮蔽探索的表面区间 —— 与[压缩接缝](../../compact/README.md)相同的 `surfaceOp: { op: 'replace' }` 机制 —— 使后续请求不再携带探索的中间步骤（读文件、搜索、试验），而持久日志完整保留探索过程供审计。报告由 `ctx.llm` 自动生成；标记来自兄弟插件 [`@dpskh/tool-checkpoint`](../tool-checkpoint/README.md)。不修改任何上游包。
+一个包、一个入口插件。挂载 `@dpskh/tool-rewind` 提供 `ctx.rewind`（把最近一次 `checkpoint/mark` 之后的一切折叠成自动生成报告的服务）和基于它的模型侧 `rewind` 工具。折叠用报告遮蔽探索的表面区间 —— 与 DeepSeek Harness 压缩接缝相同的 `surfaceOp: { op: 'replace' }` 机制 —— 使后续请求不再携带探索的中间步骤（读文件、搜索、试验），而持久日志完整保留探索过程供审计。报告由 `ctx.llm` 自动生成；标记来自兄弟插件 [`@dpskh/tool-checkpoint`](https://github.com/dsh-external/dsh-checkpoint)。不修改任何上游包。
 
 ## 配置
 
@@ -18,6 +18,19 @@
 ```
 
 报告调用的 provider/model 解析顺序：配置覆盖，其次会话最近路由的 `request/header` 配置，最后 agent 的 options。三者全缺则响亮报错。
+
+## 配合使用
+
+折叠需要标记：两个插件一起挂载，`rewind` 才能折叠 `checkpoint` 锚定的探索。单独挂 `rewind` 没有可折叠的内容，会以 no-checkpoint 错误失败；单独挂 `checkpoint` 只会记录惰性标记。
+
+```yaml
+- id: tool-checkpoint
+  name: '@dpskh/tool-checkpoint'    # https://github.com/dsh-external/dsh-checkpoint
+- id: tool-rewind
+  name: '@dpskh/tool-rewind'
+  config:
+    reportLanguage: en              # en | zh report instruction language
+```
 
 ## 契约
 
