@@ -90,9 +90,12 @@ export function assertNoActiveFold(events: readonly SessionEvent[]): void {
 /**
  * Select the fold region: every surface node after the checkpoint mark up to
  * the last balanced node before the current step's assistant message (the
- * message carrying the rewind call itself, which is never folded). The region
- * must be non-empty and its boundaries must not split a tool-call/result
- * pair.
+ * message carrying the rewind call itself, which is never folded). A mark
+ * appended mid-call — the checkpoint tool runs between its own assistant
+ * tool-call and tool/result — leaves an orphaned result as the first node
+ * after the mark; selection skips past such nodes to the next balanced cut,
+ * so the fold never splits the checkpoint call's own pair. The region must
+ * be non-empty and its boundaries must not split a tool-call/result pair.
  * @param session - the session whose surface to fold.
  * @param markSeq - seq of the `checkpoint/mark` the fold starts after.
  * @returns the validated inclusive surface span.
@@ -101,9 +104,14 @@ export function assertNoActiveFold(events: readonly SessionEvent[]): void {
  */
 export function selectFoldRegion(session: Session, markSeq: number): FoldRegion {
   const nodes = session.surface.nodes
-  const startIdx = nodes.findIndex(seq => seq > markSeq)
+  let startIdx = nodes.findIndex(seq => seq > markSeq)
   if (startIdx === -1) {
     throw new RewindError('EMPTY_REGION', 'rewind: no surface nodes after the checkpoint mark')
+  }
+  while (startIdx < nodes.length) {
+    /* oxlint-disable-next-line typescript/no-non-null-assertion -- startIdx is clamped to nodes.length, so the node exists */
+    if (toolPairingBalancedBefore(session, nodes[startIdx]!)) break
+    startIdx += 1
   }
   const events = session.events
   const currentMessageIdx = events.findLastIndex(event => event.type === 'assistant/message')
@@ -125,13 +133,6 @@ export function selectFoldRegion(session: Session, markSeq: number): FoldRegion 
     throw new RewindError(
       'UNBALANCED',
       'rewind: the fold region cannot be cut at a balanced boundary (an open tool-call/result pair spans it)',
-    )
-  }
-  /* oxlint-disable-next-line typescript/no-non-null-assertion -- startIdx is a valid surface position by construction */
-  if (!toolPairingBalancedBefore(session, nodes[startIdx]!)) {
-    throw new RewindError(
-      'UNBALANCED',
-      'rewind: the fold region start would split a tool-call/result pair',
     )
   }
   return {

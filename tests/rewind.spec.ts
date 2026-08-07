@@ -159,7 +159,31 @@ describe('region selection', () => {
     expect(() => selectFoldRegion(session, mark.seq)).toThrow(/balanced boundary/)
   })
 
-  it('rejects a region whose start would split a tool-call/result pair', () => {
+  it('folds an exploration whose checkpoint call spans the mark', () => {
+    // The real checkpoint tool runs between its own assistant tool-call and
+    // tool/result, so the mark lands inside that pair: the orphaned result
+    // is skipped and the fold starts at the exploration that follows.
+    const session = Session.create(SessionId('midcall'))
+    session.append('turn/start', { turn: 1 })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Find the cause' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    session.append('assistant/message', { turn: 1, step: 1, message: toolCallMessage('c1', 'checkpoint') }, { surfaceOp: 'append' })
+    session.append('checkpoint/mark', { turn: 1 })
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: CallId('c1'), content: [{ type: 'text', text: '{"seq":2}' }], isError: false }) }, { surfaceOp: 'append' })
+    session.append('assistant/message', { turn: 1, step: 2, message: toolCallMessage('c2', 'bash') }, { surfaceOp: 'append' })
+    session.append('tool/result', { turn: 1, step: 2, message: createToolResultMessage({ callId: CallId('c2'), content: [{ type: 'text', text: 'exploration output line' }], isError: false }) }, { surfaceOp: 'append' })
+    session.append('assistant/message', { turn: 1, step: 3, message: toolCallMessage('c3', 'rewind') }, { surfaceOp: 'append' })
+    const mark = findLatestMark(session.events)!
+    const region = selectFoldRegion(session, mark.seq)
+    expect(region.shadowedSeqs).toEqual([5, 6])
+    // The checkpoint call's own pair stays outside the fold and model-visible.
+    expect(region.start).toBe(5)
+    expect(region.end).toBe(6)
+  })
+
+  it('skips an orphaned result and folds nothing when only the rewind call follows', () => {
     const session = Session.create(SessionId('splitstart'))
     session.append('turn/start', { turn: 1 })
     session.append('checkpoint/mark', { turn: 1 })
@@ -181,7 +205,17 @@ describe('region selection', () => {
     session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: CallId('c2'), content: [], isError: false }) }, { surfaceOp: 'append' })
     session.append('assistant/message', { turn: 1, step: 2, message: toolCallMessage('c3', 'rewind') }, { surfaceOp: 'append' })
     const mark = findLatestMark(session.events)!
-    expect(() => selectFoldRegion(session, mark.seq)).toThrow(/would split a tool-call\/result pair/)
+    expect(() => selectFoldRegion(session, mark.seq)).toThrow(/no surface nodes between the checkpoint/)
+  })
+
+  it('rejects when an orphaned result is the only node after the mark', () => {
+    const session = Session.create(SessionId('lone-result'))
+    session.append('turn/start', { turn: 1 })
+    session.append('assistant/message', { turn: 1, step: 1, message: toolCallMessage('c1', 'checkpoint') }, { surfaceOp: 'append' })
+    session.append('checkpoint/mark', { turn: 1 })
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: CallId('c1'), content: [], isError: false }) }, { surfaceOp: 'append' })
+    const mark = findLatestMark(session.events)!
+    expect(() => selectFoldRegion(session, mark.seq)).toThrow(/no surface nodes between the checkpoint/)
   })
 
   it('folds to the surface tail when no assistant message exists yet', () => {

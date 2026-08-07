@@ -21,7 +21,7 @@
 
 ## 契约
 
-- `ctx.rewind.rewind(agent, signal)` —— 找到最近的 `checkpoint/mark`；选取其后的平衡表面区间（绝不切开 tool-call/result 配对，绝不折叠 rewind 调用本身）；通过 `ctx.llm` 总结该区间；随后在**一个同步块**内提交 `checkpoint/rewind` 溯源记录和携带报告的替换 `user/message`（source 标记 `{ kind: 'plugin', plugin: 'rewind' }`，`isRewindReportSource` 可识别）。失败时以错误记录闭合折叠括号，并以分类 `RewindError`（`NO_CHECKPOINT`、`EMPTY_REGION`、`UNBALANCED`、`FOLD_IN_PROGRESS`、`CHANGED`、`SHRINK`）拒绝。
+- `ctx.rewind.rewind(agent, signal)` —— 找到最近的 `checkpoint/mark`；选取其后的平衡表面区间（绝不切开 tool-call/result 配对，绝不折叠 rewind 调用本身）；通过 `ctx.llm` 总结该区间；随后在**一个同步块**内提交 `checkpoint/rewind` 溯源记录和携带报告的替换 `user/message`（source 标记 `{ kind: 'plugin', plugin: 'rewind' }`，`isRewindReportSource` 可识别）。失败时以错误记录闭合折叠括号，并以分类 `RewindError`（`NO_CHECKPOINT`、`EMPTY_REGION`、`UNBALANCED`、`FOLD_IN_PROGRESS`、`CHANGED`、`SHRINK`）拒绝。若标记在调用中途追加（checkpoint 工具在自身的 tool-call 与结果之间运行），该结果会成为标记后的孤立节点；选区会跳过它到下一个平衡切点，使 checkpoint 调用自身的配对保持可见，折叠从随后的探索开始。
 - `rewind` 工具 —— 无参数 → `{ checkpointSeq, foldedNodes, start, end }`。渲染意图：generic 卡片。
 
 ## 模型体验
