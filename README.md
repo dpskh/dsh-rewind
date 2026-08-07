@@ -36,6 +36,7 @@ The fold needs a marker: mount both plugins so `rewind` can collapse the explora
 
 - `ctx.rewind.rewind(agent, signal)` — find the most recent `checkpoint/mark`; select the balanced surface span after it (never splitting a tool-call/result pair, never folding the rewind call itself); summarize the span over `ctx.llm`; then commit, in one synchronous block, a `checkpoint/rewind` provenance record plus a replacement `user/message` carrying the report with source marker `{ kind: 'plugin', plugin: 'rewind' }` (`isRewindReportSource` recognizes it). Failures close the fold bracket with an error record and reject with a classified `RewindError` (`NO_CHECKPOINT`, `EMPTY_REGION`, `UNBALANCED`, `FOLD_IN_PROGRESS`, `CHANGED`, `SHRINK`). A mark appended mid-call — the checkpoint tool runs between its own tool-call and result — leaves that result orphaned right after the mark; selection skips it to the next balanced cut, so the checkpoint call's own pair stays visible and the fold starts at the exploration that follows.
 - `rewind` tool — no arguments → `{ checkpointSeq, foldedNodes, start, end }`. Render intent: generic card.
+- **Turn guard** — while the latest `checkpoint/mark` is unfolded, `agent/turn-stopping` injects a standing warning into the agent's next-step inbox (one per agent per turn), so the turn cannot end until `rewind` folds the exploration. A rewind that legitimately fails (e.g. an empty region) cannot trap the turn in a warning loop.
 
 ## Model Experience
 

@@ -68,6 +68,19 @@ export function findLatestMark(
 }
 
 /**
+ * Whether a checkpoint is active: the latest mark has no `checkpoint/rewind`
+ * record referencing it, so the model still owes a fold before the turn ends.
+ * @param events - a session log.
+ * @returns whether the most recent mark is unfolded.
+ */
+export function hasActiveCheckpoint(events: readonly SessionEvent[]): boolean {
+  const mark = findLatestMark(events)
+  if (mark === undefined) return false
+  return !events.some(event =>
+    event.type === 'checkpoint/rewind' && event.data.checkpointSeq === mark.seq)
+}
+
+/**
  * Reject a fold while another is in progress: any unmatched
  * `checkpoint/fold-start` bracket in the log.
  * @param events - a session log.

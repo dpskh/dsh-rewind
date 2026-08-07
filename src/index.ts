@@ -24,6 +24,7 @@ import * as toolPlugin from './tool.ts'
 export type { CheckpointRewindEvent } from './types.ts'
 
 import { REWIND_REPORT_SOURCE } from './brand.ts'
+import { installRewindGuard } from './guard.ts'
 import {
   RewindError,
   assertNoActiveFold,
@@ -182,11 +183,13 @@ export const Config: z<Config> = z.object({
 })
 
 /**
- * Compose the entry plugin: provide the fold service first, then mount the
- * tool child plugin (which injects the service it delegates to). The service
- * activation is awaited — its `llm` inject resolves asynchronously.
+ * Compose the entry plugin: install the turn-ending fold guard, provide the
+ * fold service, then mount the tool child plugin (which injects the service
+ * it delegates to). The service activation is awaited — its `llm` inject
+ * resolves asynchronously.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
+  installRewindGuard(ctx)
   await ctx.plugin(RewindService, config)
   await ctx.plugin(toolPlugin, config)
 }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
@@ -9,7 +9,8 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 
 import { isRewindReportSource } from '../src/brand.ts'
-import { RewindError, assertNoActiveFold, assertRegionUnchanged, findLatestMark, openTurnOf, selectFoldRegion } from '../src/region.ts'
+import { REWIND_GUARD_SOURCE, REWIND_GUARD_TEXT } from '../src/guard.ts'
+import { RewindError, assertNoActiveFold, assertRegionUnchanged, findLatestMark, hasActiveCheckpoint, openTurnOf, selectFoldRegion } from '../src/region.ts'
 import { buildSummarizationInput, summarizeRegion } from '../src/summarize.ts'
 import { RewindService } from '../src/index.ts'
 import * as tool from '../src/index.ts'
@@ -555,5 +556,82 @@ describe('report source marker', () => {
     expect(isRewindReportSource({ kind: 'plugin', plugin: 'rewind' })).toBe(true)
     expect(isRewindReportSource({ kind: 'user' })).toBe(false)
     expect(isRewindReportSource({ kind: 'plugin', plugin: 'compact' })).toBe(false)
+  })
+})
+
+describe('turn guard', () => {
+  async function setupGuard(): Promise<Context> {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRegistry)
+    await ctx.plugin(LlmService)
+    const adapter = new ScriptedAdapter(textChunks('report'))
+    ctx.llm.registerAdapter([MODEL], adapter)
+    await ctx.plugin(tool)
+    return ctx
+  }
+
+  it('reports an active checkpoint from the log', () => {
+    const session = Session.create(SessionId('guard-state'))
+    session.append('turn/start', { turn: 1 })
+    expect(hasActiveCheckpoint(session.events)).toBe(false)
+    const mark = session.append('checkpoint/mark', { turn: 1 })
+    expect(hasActiveCheckpoint(session.events)).toBe(true)
+    // A rewind record referencing a different (older) mark keeps it active.
+    session.append('checkpoint/rewind', {
+      turn: 1,
+      report: 'older fold',
+      checkpointSeq: mark.seq - 1,
+      shadowedRange: { start: 0, end: 0 },
+      shadowedSeqs: [],
+      provider: MODEL,
+      model: MODEL,
+    })
+    expect(hasActiveCheckpoint(session.events)).toBe(true)
+    // The record referencing the latest mark closes it.
+    session.append('checkpoint/rewind', {
+      turn: 1,
+      report: 'fold',
+      checkpointSeq: mark.seq,
+      shadowedRange: { start: 0, end: 0 },
+      shadowedSeqs: [],
+      provider: MODEL,
+      model: MODEL,
+    })
+    expect(hasActiveCheckpoint(session.events)).toBe(false)
+  })
+
+  it('injects the warning once per turn while a checkpoint is active', async () => {
+    const ctx = await setupGuard()
+    const session = Session.create(SessionId('guard-inject'))
+    session.append('turn/start', { turn: 1 })
+    const mark = session.append('checkpoint/mark', { turn: 1 })
+    const inject = vi.fn()
+    const agent = { id: SessionId('guard-inject'), session, inject } as unknown as Agent
+
+    ctx.emit('agent/turn-stopping', { agent, turn: 1, signal: SIGNAL })
+    expect(inject).toHaveBeenCalledTimes(1)
+    const message = inject.mock.calls[0]![0] as ReturnType<typeof createUserMessage>
+    expect(message.content[0].type).toBe('text')
+    expect((message.content[0] as { text: string }).text).toBe(REWIND_GUARD_TEXT)
+    expect(message.source).toEqual(REWIND_GUARD_SOURCE)
+
+    // A second stop attempt in the same turn is not warned again — a rewind
+    // that legitimately fails must not trap the turn in a warning loop.
+    ctx.emit('agent/turn-stopping', { agent, turn: 1, signal: SIGNAL })
+    expect(inject).toHaveBeenCalledTimes(1)
+
+    // After the mark is folded, a later turn stops quietly.
+    session.append('checkpoint/rewind', {
+      turn: 1,
+      report: 'fold',
+      checkpointSeq: mark.seq,
+      shadowedRange: { start: 0, end: 0 },
+      shadowedSeqs: [],
+      provider: MODEL,
+      model: MODEL,
+    })
+    ctx.emit('agent/turn-stopping', { agent, turn: 2, signal: SIGNAL })
+    expect(inject).toHaveBeenCalledTimes(1)
   })
 })
