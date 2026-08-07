@@ -612,8 +612,7 @@ describe('turn guard', () => {
     ctx.emit('agent/turn-stopping', { agent, turn: 1, signal: SIGNAL })
     expect(inject).toHaveBeenCalledTimes(1)
     const message = inject.mock.calls[0]![0] as ReturnType<typeof createUserMessage>
-    expect(message.content[0].type).toBe('text')
-    expect((message.content[0] as { text: string }).text).toBe(REWIND_GUARD_TEXT)
+    expect(message.content).toEqual([{ type: 'text', text: REWIND_GUARD_TEXT }])
     expect(message.source).toEqual(REWIND_GUARD_SOURCE)
 
     // A second stop attempt in the same turn is not warned again — a rewind
