@@ -43,7 +43,7 @@ function toolCallMessage(callId: string, name: string) {
  * Surface nodes: [user/message, assistant(bash), tool/result, assistant(rewind)].
  */
 function explorationSession(): Session {
-  const session = new Session(SessionId('explore'))
+  const session = Session.create(SessionId('explore'))
   session.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
   session.append('user/message', createUserMessage({
     content: [{ type: 'text', text: 'Find the cause' }],
@@ -111,7 +111,7 @@ describe('region selection', () => {
     const marks = session.events.filter(e => e.type === 'checkpoint/mark')
     expect(marks).toHaveLength(1)
     expect(findLatestMark(session.events)?.seq).toBe(marks[0]!.seq)
-    expect(findLatestMark(new Session(SessionId('empty')).events)).toBeUndefined()
+    expect(findLatestMark(Session.create(SessionId('empty')).events)).toBeUndefined()
   })
 
   it('selects the balanced span after the mark, excluding the rewind call', () => {
@@ -124,7 +124,7 @@ describe('region selection', () => {
   })
 
   it('rejects a fold with no mark or nothing after it', () => {
-    const bare = new Session(SessionId('bare'))
+    const bare = Session.create(SessionId('bare'))
     expect(() => selectFoldRegion(bare, 0)).toThrow(RewindError)
     expect(() => selectFoldRegion(bare, 0)).toThrow(/no surface nodes after the checkpoint/)
 
@@ -137,7 +137,7 @@ describe('region selection', () => {
 
   it('rejects a fold with nothing between the mark and the rewind call', () => {
     // Build a fresh session where the mark lands right before the rewind call.
-    const tight = new Session(SessionId('tight'))
+    const tight = Session.create(SessionId('tight'))
     tight.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
     tight.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'Find the cause' }],
@@ -150,7 +150,7 @@ describe('region selection', () => {
   })
 
   it('rejects an unbalanced region whose open tool call never resolves', () => {
-    const session = new Session(SessionId('unbalanced'))
+    const session = Session.create(SessionId('unbalanced'))
     session.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
     session.append('checkpoint/mark', { turn: 1 })
     session.append('assistant/message', { turn: 1, step: 1, message: toolCallMessage('c1', 'bash') }, { surfaceOp: 'append' })
@@ -160,7 +160,7 @@ describe('region selection', () => {
   })
 
   it('rejects a region whose start would split a tool-call/result pair', () => {
-    const session = new Session(SessionId('splitstart'))
+    const session = Session.create(SessionId('splitstart'))
     session.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
     session.append('checkpoint/mark', { turn: 1 })
     // The assistant requests TWO calls; only the first resolves before the
@@ -185,7 +185,7 @@ describe('region selection', () => {
   })
 
   it('folds to the surface tail when no assistant message exists yet', () => {
-    const session = new Session(SessionId('noassistant'))
+    const session = Session.create(SessionId('noassistant'))
     session.append('checkpoint/mark', { turn: null })
     session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'a' }],
@@ -211,7 +211,7 @@ describe('region selection', () => {
   })
 
   it('tracks the open turn across boundaries', () => {
-    const session = new Session(SessionId('turns'))
+    const session = Session.create(SessionId('turns'))
     expect(openTurnOf(session.events)).toBeNull()
     session.append('turn/start', { turn: 7, trigger: { kind: 'message', source: { kind: 'user' } } })
     expect(openTurnOf(session.events)).toBe(7)
@@ -303,7 +303,7 @@ describe('rewind service', () => {
 
   it('rejects a fold without a checkpoint mark', async () => {
     const { ctx } = await setup(textChunks('report'))
-    const session = new Session(SessionId('bare'))
+    const session = Session.create(SessionId('bare'))
     await expect(ctx.rewind.rewind(agentWithSession(session), SIGNAL)).rejects.toThrow(/no checkpoint\/mark/)
   })
 
@@ -316,7 +316,7 @@ describe('rewind service', () => {
 
   it('rejects a summary that is not smaller than the folded region', async () => {
     const { ctx } = await setup(textChunks('x'.repeat(200)))
-    const session = new Session(SessionId('shrink'))
+    const session = Session.create(SessionId('shrink'))
     session.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
     session.append('checkpoint/mark', { turn: 1 })
     session.append('assistant/message', {
@@ -333,7 +333,7 @@ describe('rewind service', () => {
 
   it('skips empty-content assistant nodes when building the summarization input', async () => {
     const { ctx } = await setup(textChunks('report'))
-    const session = new Session(SessionId('emptyassistant'))
+    const session = Session.create(SessionId('emptyassistant'))
     session.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
     session.append('checkpoint/mark', { turn: 1 })
     // An empty-content assistant/message derives to no LLM message (it only
@@ -349,7 +349,7 @@ describe('rewind service', () => {
 
   it('skips the shrink check when the folded region carries no text', async () => {
     const { ctx } = await setup(textChunks('report'))
-    const session = new Session(SessionId('toolonly'))
+    const session = Session.create(SessionId('toolonly'))
     session.append('turn/start', { turn: 1, trigger: { kind: 'message', source: { kind: 'user' } } })
     session.append('checkpoint/mark', { turn: 1 })
     session.append('assistant/message', { turn: 1, step: 1, message: toolCallMessage('c1', 'bash') }, { surfaceOp: 'append' })
@@ -390,7 +390,7 @@ describe('rewind service', () => {
 
   it('rejects when no provider/model can be resolved for summarization', async () => {
     const { ctx } = await setup(textChunks('report'))
-    const session = new Session(SessionId('nohost'))
+    const session = Session.create(SessionId('nohost'))
     session.append('checkpoint/mark', { turn: null })
     session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'explore' }],
@@ -405,7 +405,7 @@ describe('rewind service', () => {
 describe('summarizeRegion', () => {
   it('passes the session system and tools through for prefix alignment', async () => {
     const { ctx, adapter } = await setup(textChunks('report'))
-    const session = new Session(SessionId('sys'))
+    const session = Session.create(SessionId('sys'))
     session.append('request/header', {
       header: {
         config: { provider: MODEL, model: MODEL },
@@ -429,7 +429,7 @@ describe('summarizeRegion', () => {
 
   it('falls back to agent options when no routed header exists', async () => {
     const { ctx, adapter } = await setup(textChunks('report'))
-    const session = new Session(SessionId('noheader'))
+    const session = Session.create(SessionId('noheader'))
     await summarizeRegion(
       ctx,
       { messages: [] },
@@ -445,7 +445,7 @@ describe('summarizeRegion', () => {
     [{ provider: MODEL, model: '' }, /no provider\/model available/],
   ])('rejects partial agent options %j', async (options, message) => {
     const { ctx } = await setup(textChunks('report'))
-    const session = new Session(SessionId('partial'))
+    const session = Session.create(SessionId('partial'))
     await expect(summarizeRegion(
       ctx,
       { messages: [] },
