@@ -9,7 +9,7 @@
  */
 
 import type { Context } from 'cordis'
-import { BlockAssembler, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   Message,
@@ -33,6 +33,7 @@ export interface RewindSummarizationInput {
 /** Resolved rewind summarization settings. */
 export interface RewindSummarizeConfig {
   readonly maxTokens: number
+  readonly maxSummarizationRetries: number
   readonly summarizationProvider?: string
   readonly summarizationModel?: string
   readonly reportLanguage: 'en' | 'zh'
@@ -179,8 +180,24 @@ export async function summarizeRegion(
     )
   }
 
+  // Condensing an exploration is mechanical; a reasoning model's thinking
+  // tokens otherwise compete with the report text under maxTokens and can
+  // exhaust the budget before any text starts (finish `length` with an
+  // empty report — the repeated "no text report content" failures). Disable
+  // thinking when the route exposes an `off` reasoning effort; routes
+  // without one keep their default effort.
+  let reasoningEffort: ReasoningEffortId | undefined
+  try {
+    const info = await ctx.llm.resolveModelInfo(target.provider, target.model, signal)
+    if (info.reasoning?.efforts.some(effort => effort.id === OFF_REASONING_EFFORT)) {
+      reasoningEffort = OFF_REASONING_EFFORT
+    }
+  } catch {
+    // Capability probing must never fail the fold: without reasoning
+    // metadata the call keeps the route's default effort.
+  }
+
   const instruction = config.reportLanguage === 'zh' ? REWIND_INSTRUCTION_ZH : REWIND_INSTRUCTION_EN
-  const assembler = new BlockAssembler()
   const messages: Message[] = [
     ...input.messages,
     createUserMessage({
@@ -196,25 +213,44 @@ export async function summarizeRegion(
     ...input.tools === undefined ? {} : { tools: [...input.tools] },
     maxTokens: config.maxTokens,
     sessionId: agent.session.id,
+    ...reasoningEffort === undefined ? {} : { reasoningEffort },
     ...signal === undefined ? {} : { signal },
   }
-  for await (const chunk of ctx.llm.stream(options)) assembler.push(chunk)
-  const finish = assembler.finish
-  if (finish.kind === 'error' || finish.kind === 'aborted') {
-    throw new Error(`rewind summarization stream ended with ${finish.kind}`)
-  }
-  const report = assembler.blocks()
-    .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')
-    .map(block => block.text)
-    .join('')
-  if (report.trim().length === 0) {
-    throw new Error('rewind summarization produced no text report content')
-  }
-  return {
-    report,
-    provider: options.provider,
-    model: options.model,
-    maxTokens: config.maxTokens,
-    ...assembler.usage === undefined ? {} : { usage: assembler.usage },
+  // An empty completion is sampling noise, not a bad region: retry it, but
+  // never an error/aborted finish or a cancelled signal.
+  for (let attempt = 0; ; attempt++) {
+    const assembler = new BlockAssembler()
+    for await (const chunk of ctx.llm.stream(options)) assembler.push(chunk)
+    const finish = assembler.finish
+    if (finish.kind === 'error' || finish.kind === 'aborted') {
+      throw new Error(`rewind summarization stream ended with ${finish.kind}`)
+    }
+    const report = assembler.blocks()
+      .filter((block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text')
+      .map(block => block.text)
+      .join('')
+    if (report.trim().length > 0) {
+      return {
+        report,
+        provider: options.provider,
+        model: options.model,
+        maxTokens: config.maxTokens,
+        ...assembler.usage === undefined ? {} : { usage: assembler.usage },
+      }
+    }
+    signal?.throwIfAborted()
+    if (attempt >= config.maxSummarizationRetries) {
+      const usage = assembler.usage
+      const detail = usage === undefined
+        ? `finish: ${finish.kind}`
+        : `finish: ${finish.kind}, outputTokens: ${usage.outputTokens}`
+          + (usage.reasoningTokens === undefined ? '' : `, reasoningTokens: ${usage.reasoningTokens}`)
+      throw new Error(
+        `rewind summarization produced no text report content after ${config.maxSummarizationRetries} retries (${detail})`,
+      )
+    }
   }
 }
+
+/** The reasoning effort that disables thinking, as advertised by reasoning routes. */
+const OFF_REASONING_EFFORT = ReasoningEffortId('off')

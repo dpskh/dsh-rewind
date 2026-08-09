@@ -69,6 +69,7 @@ export class RewindService extends Service {
   static inject = ['llm']
 
   private readonly maxTokens: number
+  private readonly maxSummarizationRetries: number
   private readonly summarizationProvider: string | undefined
   private readonly summarizationModel: string | undefined
   private readonly reportLanguage: 'en' | 'zh'
@@ -76,6 +77,7 @@ export class RewindService extends Service {
   constructor(ctx: Context, config: Partial<RewindSummarizeConfig> = {}) {
     super(ctx, 'rewind')
     this.maxTokens = config.maxTokens ?? 1024
+    this.maxSummarizationRetries = config.maxSummarizationRetries ?? 2
     this.summarizationProvider = config.summarizationProvider
     this.summarizationModel = config.summarizationModel
     this.reportLanguage = config.reportLanguage ?? 'en'
@@ -108,6 +110,7 @@ export class RewindService extends Service {
       const input = buildSummarizationInput(session, region)
       const summary = await summarizeRegion(this.ctx, input, agent, {
         maxTokens: this.maxTokens,
+        maxSummarizationRetries: this.maxSummarizationRetries,
         ...this.summarizationProvider === undefined || this.summarizationModel === undefined
           ? {}
           : { summarizationProvider: this.summarizationProvider, summarizationModel: this.summarizationModel },
@@ -169,6 +172,7 @@ export const name = 'tool-rewind'
 export interface Config {
   toolName: string
   maxTokens: number
+  maxSummarizationRetries: number
   summarizationProvider?: string
   summarizationModel?: string
   reportLanguage: 'en' | 'zh'
@@ -177,6 +181,7 @@ export interface Config {
 export const Config: z<Config> = z.object({
   toolName: z.string().default('rewind'),
   maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(1024),
+  maxSummarizationRetries: z.number().step(1).min(0).max(8).default(2),
   summarizationProvider: z.string(),
   summarizationModel: z.string(),
   reportLanguage: z.union(['en', 'zh'] as const).default('en'),

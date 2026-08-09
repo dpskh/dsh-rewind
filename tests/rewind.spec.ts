@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
-import LlmService, { CallId, LlmAdapter, createMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import LlmService, { CallId, LlmAdapter, ReasoningEffortId, createMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
@@ -69,7 +69,33 @@ function explorationSession(): Session {
 class ScriptedAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
 
-  constructor(private readonly chunks: StreamChunk[]) {
+  constructor(
+    private readonly chunks: StreamChunk[],
+    private readonly reasoning?: LlmResolvedModelInfo['reasoning'],
+  ) {
+    super()
+  }
+
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      ...this.reasoning === undefined ? {} : { reasoning: this.reasoning },
+    })
+  }
+
+  override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(options)
+    for (const chunk of this.chunks) yield chunk
+  }
+}
+
+/** A scripted adapter with one chunk set per stream call (retry tests). */
+class SequenceAdapter extends LlmAdapter {
+  readonly requests: GenerateOptions[] = []
+
+  constructor(private readonly sequences: StreamChunk[][]) {
     super()
   }
 
@@ -79,7 +105,10 @@ class ScriptedAdapter extends LlmAdapter {
 
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
-    for (const chunk of this.chunks) yield chunk
+    const chunks = this.sequences[this.requests.length - 1]
+    if (chunks !== undefined) {
+      for (const chunk of chunks) yield chunk
+    }
   }
 }
 
@@ -258,13 +287,14 @@ describe('region selection', () => {
 
 describe('rewind service', () => {
   it('resolves service config with defaults', () => {
-    const read = (service: RewindService): { maxTokens: number; language: string } => ({
+    const read = (service: RewindService): { maxTokens: number; retries: number; language: string } => ({
       maxTokens: (service as unknown as { maxTokens: number }).maxTokens,
+      retries: (service as unknown as { maxSummarizationRetries: number }).maxSummarizationRetries,
       language: (service as unknown as { reportLanguage: string }).reportLanguage,
     })
-    expect(read(new RewindService(new Context(), {}))).toEqual({ maxTokens: 1024, language: 'en' })
-    expect(read(new RewindService(new Context(), { maxTokens: 512, reportLanguage: 'zh' })))
-      .toEqual({ maxTokens: 512, language: 'zh' })
+    expect(read(new RewindService(new Context(), {}))).toEqual({ maxTokens: 1024, retries: 2, language: 'en' })
+    expect(read(new RewindService(new Context(), { maxTokens: 512, maxSummarizationRetries: 0, reportLanguage: 'zh' })))
+      .toEqual({ maxTokens: 512, retries: 0, language: 'zh' })
   })
 
   it('folds the exploration into an auto-generated report', async () => {
@@ -396,12 +426,81 @@ describe('rewind service', () => {
   })
 
   it('records a fold-end with the error when summarization fails', async () => {
-    const { ctx } = await setup([{ type: 'finish', reason: { kind: 'stop' } }])
+    const { ctx } = await setup([{ type: 'finish', reason: { kind: 'stop' } }], { maxSummarizationRetries: 0 })
     const session = explorationSession()
     await expect(ctx.rewind.rewind(agentWithSession(session), SIGNAL)).rejects.toThrow(/no text report/)
     const ends = session.events.filter(e => e.type === 'checkpoint/fold-end')
     expect(ends).toHaveLength(1)
     expect(ends[0]!.data.error).toMatch(/no text report/)
+  })
+
+  it('retries an empty completion and succeeds on a later attempt', async () => {
+    const adapter = new SequenceAdapter([
+      [{ type: 'finish', reason: { kind: 'stop' } }],
+      textChunks('report'),
+    ])
+    const ctx = new Context()
+    await ctx.plugin(LlmService)
+    await ctx.plugin(SystemPrompt)
+    ctx.llm.registerAdapter([MODEL], adapter)
+    // Partial is fine at the mount boundary: the plugin Config schema applies
+    // defaults for absent fields (exactOptionalPropertyTypes forbids the spread).
+    await ctx.plugin(tool, {} as Config)
+    const session = explorationSession()
+    await expect(ctx.rewind.rewind(agentWithSession(session, { provider: MODEL, model: MODEL }), SIGNAL))
+      .resolves.toMatchObject({ foldedNodes: 2 })
+    expect(adapter.requests).toHaveLength(2)
+  })
+
+  it('exhausts the retry budget and reports finish/usage diagnostics', async () => {
+    const { ctx, adapter } = await setup(
+      [{ type: 'usage', usage: { inputTokens: 1, outputTokens: 1024, reasoningTokens: 1024 } }, { type: 'finish', reason: { kind: 'max-tokens' } }],
+      { maxSummarizationRetries: 2 },
+    )
+    const session = explorationSession()
+    await expect(ctx.rewind.rewind(agentWithSession(session), SIGNAL))
+      .rejects.toThrow(/no text report content after 2 retries \(finish: max-tokens, outputTokens: 1024, reasoningTokens: 1024\)/)
+    const ends = session.events.filter(e => e.type === 'checkpoint/fold-end')
+    expect(ends).toHaveLength(1)
+    expect(ends[0]!.data.error).toMatch(/finish: max-tokens/)
+    expect(adapter.requests).toHaveLength(3)
+  })
+
+  it('reports output tokens alone when the exhausted call reports no reasoning usage', async () => {
+    const { ctx } = await setup(
+      [{ type: 'usage', usage: { inputTokens: 1, outputTokens: 1024 } }, { type: 'finish', reason: { kind: 'max-tokens' } }],
+      { maxSummarizationRetries: 0 },
+    )
+    const session = explorationSession()
+    await expect(ctx.rewind.rewind(agentWithSession(session), SIGNAL))
+      .rejects.toThrow(/no text report content after 0 retries \(finish: max-tokens, outputTokens: 1024\)/)
+  })
+
+  it('disables thinking for the report call when the route exposes an off effort', async () => {
+    const adapter = new ScriptedAdapter(textChunks('report'), {
+      efforts: [
+        { id: ReasoningEffortId('off'), name: 'Off' },
+        { id: ReasoningEffortId('high'), name: 'High' },
+      ],
+      defaultEffort: ReasoningEffortId('high'),
+    })
+    const ctx = new Context()
+    await ctx.plugin(LlmService)
+    await ctx.plugin(SystemPrompt)
+    ctx.llm.registerAdapter([MODEL], adapter)
+    // Partial is fine at the mount boundary: the plugin Config schema applies
+    // defaults for absent fields (exactOptionalPropertyTypes forbids the spread).
+    await ctx.plugin(tool, {} as Config)
+    const session = explorationSession()
+    await ctx.rewind.rewind(agentWithSession(session, { provider: MODEL, model: MODEL }), SIGNAL)
+    expect(adapter.requests[0]!.reasoningEffort).toBe('off')
+  })
+
+  it('keeps the route default effort when no off effort is advertised', async () => {
+    const { ctx, adapter } = await setup(textChunks('report'))
+    const session = explorationSession()
+    await ctx.rewind.rewind(agentWithSession(session, { provider: MODEL, model: MODEL }), SIGNAL)
+    expect(adapter.requests[0]!.reasoningEffort).toBeUndefined()
   })
 
   it('records a fold-end when the summarization stream errors', async () => {
@@ -454,7 +553,7 @@ describe('summarizeRegion', () => {
       ctx,
       buildSummarizationInput(session, { start: 0, end: -1, shadowedSeqs: [] }),
       agentWithSession(session, { provider: MODEL, model: MODEL }),
-      { maxTokens: 64, reportLanguage: 'en' },
+      { maxTokens: 64, maxSummarizationRetries: 0, reportLanguage: 'en' },
     )
     expect(summary.report).toBe('report')
     expect(adapter.requests[0]!.system).toBe('sys-text')
@@ -470,7 +569,7 @@ describe('summarizeRegion', () => {
       ctx,
       { messages: [] },
       agentWithSession(session, { provider: MODEL, model: MODEL }),
-      { maxTokens: 64, reportLanguage: 'en' },
+      { maxTokens: 64, maxSummarizationRetries: 0, reportLanguage: 'en' },
     )
     expect(adapter.requests[0]!.provider).toBe(MODEL)
   })
@@ -486,7 +585,7 @@ describe('summarizeRegion', () => {
       ctx,
       { messages: [] },
       agentWithSession(session, options),
-      { maxTokens: 64, reportLanguage: 'en' },
+      { maxTokens: 64, maxSummarizationRetries: 0, reportLanguage: 'en' },
     )).rejects.toThrow(message)
   })
 })
@@ -539,7 +638,7 @@ describe('rewind tool', () => {
     const ctx = await setupTools(textChunks('report'))
     const assembly = await ctx.systemPrompt.assemble()
     const section = assembly.sections.find(s => s.name === 'tool:rewind')
-    expect(section?.text).toContain('MUST call `rewind` immediately')
+    expect(section?.text).toContain('MUST call `rewind` as soon as a marked exploration is done')
     expect(section?.text).toContain('Without a preceding `checkpoint` mark it errors')
   })
 

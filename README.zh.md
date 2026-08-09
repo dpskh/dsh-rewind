@@ -12,12 +12,15 @@
   config:
     toolName: rewind                # model-facing tool name (default rewind)
     maxTokens: 1024                 # summarization output budget
+    maxSummarizationRetries: 2      # empty-completion retries before failing
     summarizationProvider: deepseek # optional override of the routed provider
     summarizationModel: deepseek-chat
     reportLanguage: en              # en | zh (report instruction language)
 ```
 
 报告调用的 provider/model 解析顺序：配置覆盖，其次会话最近路由的 `request/header` 配置，最后 agent 的 options。三者全缺则响亮报错。
+
+当路由暴露 `off` reasoning effort 时，报告调用会关闭 thinking —— 压缩探索是机械性任务，而推理模型的思考 token 会在 `maxTokens` 预算内与报告文本竞争（思考可能在任何文本开始前耗尽预算，留下空补全）。空补全最多重试 `maxSummarizationRetries` 次；预算耗尽后以携带 finish 原因与 token 用量的消息拒绝，该消息被保留在 fold-end 错误记录中。
 
 ## 配合使用
 
@@ -49,5 +52,6 @@
 ## 已知限制与待办
 
 - **收缩检查基于字符** —— 报告必须比折叠区域的文本更短（按字符而非 token 度量）；基于 token 计量的检查会更精确。
+- **无 `off` reasoning effort 路由上的空补全** —— 此类路由保留默认 thinking；若 thinking 耗尽 `maxTokens`，补全为空，只有重试预算能挽救折叠。
 - **每个标记只能折叠一次** —— 对同一标记二次折叠会因区域为空而被拒绝；新探索需要新的 `checkpoint`。
 - **探索中途发生自动压缩** —— 若 `rewind` 运行前自动压缩遮蔽了探索的一部分，折叠覆盖表面剩余部分；仅日志的标记在两种情况下都存活。

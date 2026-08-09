@@ -12,12 +12,15 @@ One package, one entry plugin. Mounting `@dpskh/tool-rewind` provides `ctx.rewin
   config:
     toolName: rewind                # model-facing tool name (default rewind)
     maxTokens: 1024                 # summarization output budget
+    maxSummarizationRetries: 2      # empty-completion retries before failing
     summarizationProvider: deepseek # optional override of the routed provider
     summarizationModel: deepseek-chat
     reportLanguage: en              # en | zh (report instruction language)
 ```
 
 Provider/model resolution order for the report call: configured overrides, then the session's last routed `request/header` config, then the agent's options. Missing all three fails loud.
+
+The report call runs with thinking disabled when the route exposes an `off` reasoning effort — condensing an exploration is mechanical, and a reasoning model's thinking tokens otherwise compete with the report text under `maxTokens` (thinking can exhaust the budget before any text starts, leaving an empty completion). Empty completions retry up to `maxSummarizationRetries`; an exhausted budget rejects with a message carrying the finish reason and token usage, which the fold-end error record preserves.
 
 ## Working together
 
@@ -49,5 +52,6 @@ The report call reuses the session's system prompt and tool schemas so it stays 
 ## Known Limitations and Deferred Work
 
 - **Shrink check is char-based** — the report must be shorter than the folded region's text (measured in characters, not tokens); a token-meter-based check would be more precise.
+- **Empty completions on routes without an `off` reasoning effort** — such routes keep their default thinking; if thinking exhausts `maxTokens` the completion is empty and only the retry budget saves the fold.
 - **One fold per marker** — folding the same marker twice is rejected as an empty region; a new exploration needs a fresh `checkpoint`.
 - **Mid-exploration compaction** — if automatic compaction shadows part of the exploration before `rewind` runs, the fold covers whatever remains on the surface; the log-only marker survives either way.
