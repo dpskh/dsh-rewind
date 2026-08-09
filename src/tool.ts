@@ -25,7 +25,7 @@ export const inject = ['tools', 'rewind', 'systemPrompt']
  * model follows by default.
  */
 const REWIND_PROMPT_TEXT =
-  'Fold discipline: you MUST call `rewind` immediately after an exploration you marked with `checkpoint` is done, before starting unrelated work — it folds the exploration\'s intermediate steps into an auto-generated report. Without a preceding `checkpoint` mark it errors; never call it blindly.'
+  'Fold discipline: you MUST call `rewind` as soon as a marked exploration is done, before starting unrelated work — it folds the exploration\'s intermediate steps into an auto-generated report (conclusions, evidence, exact paths). Without a preceding `checkpoint` mark it errors, so never call it blindly. A failed fold is contained and retryable; the region stays intact.'
 
 /**
  * Register the `rewind` tool: folds everything since the most recent
@@ -41,9 +41,9 @@ export function apply(ctx: Context, config: ToolConfig): void {
   ctx.tools.register(defineTool({
     name: config.toolName,
     description:
-      'End an active checkpoint: fold everything since the most recent `checkpoint` mark into an auto-generated report, replacing the exploration\'s intermediate steps in the context.\n'
+      'End an active checkpoint: fold everything since the most recent `checkpoint` mark into an auto-generated report, replacing the exploration\'s intermediate steps in the context. The current call and its results are never folded.\n'
       + '\n'
-      + 'Call immediately after `checkpoint`-started investigative work.\n'
+      + 'Call as soon as the marked investigation is done, before starting unrelated work.\n'
       + '\n'
       + 'Requirements:\n'
       + '- You MUST call this before finishing your turn if a `checkpoint` mark is active.\n'
@@ -52,6 +52,7 @@ export function apply(ctx: Context, config: ToolConfig): void {
       + '\n'
       + 'Behavior:\n'
       + '- If no `checkpoint` mark exists, this tool errors with a no-checkpoint error.\n'
+      + '- A failed fold is contained: the region stays intact and the fold may be retried.\n'
       + '- A successful rewind is final for that mark; repeat calls error with an empty region — continue from the retained report instead of retrying.',
     parameters: {},
     output: {
