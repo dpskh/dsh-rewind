@@ -6,7 +6,7 @@
  * @module @dpskh/tool-rewind/tool
  */
 
-import type { Context } from 'cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 /** Tool-plugin config: the model-facing tool name (default `rewind`). */

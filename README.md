@@ -28,7 +28,7 @@ The fold needs a marker: mount both plugins so `rewind` can collapse the explora
 
 ```yaml
 - id: tool-checkpoint
-  name: '@dpskh/tool-checkpoint'    # https://github.com/dsh-external/dsh-checkpoint
+  name: '@dpskh/tool-checkpoint'    # https://github.com/dpskh/dsh-checkpoint
 - id: tool-rewind
   name: '@dpskh/tool-rewind'
   config:

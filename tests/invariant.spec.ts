@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { Context } from 'cordis'
+import { Context } from '@deepseek-ai/cordis'
 import SessionStore, { type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import * as RewindInvariant from '../src/invariant.ts'
 import InvariantService from '@deepseek-ai/dsh-invariants'

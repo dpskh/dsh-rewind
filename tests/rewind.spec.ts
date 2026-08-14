@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { Context } from 'cordis'
+import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
 import LlmService, { CallId, LlmAdapter, ReasoningEffortId, createMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'

@@ -10,7 +10,7 @@
 
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 
-declare module '@deepseek-ai/dsh-session' {
+declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
     /**
      * Log-only marker (canonical declaration:
@@ -59,4 +59,4 @@ declare module '@deepseek-ai/dsh-session' {
 }
 
 /** Re-export the merged map member types for consumers. */
-export type CheckpointRewindEvent = import('@deepseek-ai/dsh-session').SessionEvent<'checkpoint/rewind'>
+export type CheckpointRewindEvent = import('@deepseek-ai/dsh-session/types').SessionEvent<'checkpoint/rewind'>

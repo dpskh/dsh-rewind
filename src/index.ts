@@ -12,8 +12,8 @@
  * @module @dpskh/tool-rewind
  */
 
-import { Context, Service } from 'cordis'
-import z from 'schemastery'
+import { Context, Service } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
 import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import * as toolPlugin from './tool.ts'
@@ -40,7 +40,7 @@ import {
   type RewindSummarizeConfig,
 } from './summarize.ts'
 
-declare module 'cordis' {
+declare module '@deepseek-ai/cordis' {
   interface Context {
     rewind: RewindService
   }

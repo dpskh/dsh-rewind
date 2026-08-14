@@ -10,7 +10,7 @@
  * @module @dpskh/tool-rewind/guard
  */
 
-import type { Context } from 'cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { hasActiveCheckpoint } from './region.ts'
 

@@ -8,7 +8,7 @@
  * @module @dpskh/tool-rewind/region
  */
 
-import { toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compact'
+import { toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 
 /** Stable failure classes for a rewind fold. */
