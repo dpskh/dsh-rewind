@@ -134,12 +134,36 @@ export function buildSummarizationInput(
   }
 }
 
-/** Join the text blocks of a message list (the shrink-check yardstick). */
+/**
+ * The model-visible text one content block contributes to the folded region:
+ * the report replaces the whole span, so every block the model reads counts —
+ * assistant text, reasoning, tool-call arguments (JSON), and tool outputs
+ * (recursively). Unknown/merge-extensible blocks (e.g. images) have no text
+ * yardstick and are conservatively ignored.
+ * @param block - a content block of a folded message.
+ * @returns the block's character contribution.
+ */
+function blockTextLength(block: Message['content'][number]): number {
+  switch (block.type) {
+    case 'text':
+    case 'reasoning':
+      return block.text.length
+    case 'tool-call':
+      return block.arguments.length
+    case 'tool-result':
+      return block.content.reduce((sum, inner) => sum + blockTextLength(inner), 0)
+    default:
+      // Merge-extensible block types carry no text yardstick.
+      return 0
+  }
+}
+
+/** The model-visible text of a message list (the shrink-check yardstick). */
 export function regionTextLength(messages: readonly Message[]): number {
   let length = 0
   for (const message of messages) {
     for (const block of message.content) {
-      if (block.type === 'text') length += block.text.length
+      length += blockTextLength(block)
     }
   }
   return length

@@ -42,8 +42,8 @@
 
 ## 契约
 
-- `ctx.rewind.rewind(agent, signal)` —— 找到最近的 `checkpoint/mark`；选取其后的平衡表面区间（绝不切开 tool-call/result 配对，绝不折叠 rewind 调用本身）；通过 `ctx.llm` 总结该区间；随后在**一个同步块**内提交 `checkpoint/rewind` 溯源记录和携带报告的替换 `user/message`（source 标记 `{ kind: 'plugin', plugin: 'rewind' }`，`isRewindReportSource` 可识别）。失败时以错误记录闭合折叠括号，并以分类 `RewindError`（`NO_CHECKPOINT`、`EMPTY_REGION`、`UNBALANCED`、`FOLD_IN_PROGRESS`、`CHANGED`、`SHRINK`）拒绝。若标记在调用中途追加（checkpoint 工具在自身的 tool-call 与结果之间运行），该结果会成为标记后的孤立节点；选区会跳过它到下一个平衡切点，使 checkpoint 调用自身的配对保持可见，折叠从随后的探索开始。
-- `rewind` 工具 —— 无参数 → `{ checkpointSeq, foldedNodes, start, end }`。渲染意图：generic 卡片。
+- `ctx.rewind.rewind(agent, signal)` —— 找到最近的 `checkpoint/mark`；选取其后的表面区间（绝不折叠 rewind 调用本身，末尾边界绝不切开 tool-call/result 配对）；通过 `ctx.llm` 总结该区间；随后在**一个同步块**内提交 `checkpoint/rewind` 溯源记录和携带报告的替换 `user/message`（source 标记 `{ kind: 'plugin', plugin: 'rewind' }`，`isRewindReportSource` 可识别）。失败时以错误记录闭合折叠括号，并以分类 `RewindError`（`NO_CHECKPOINT`、`EMPTY_REGION`、`UNBALANCED`、`FOLD_IN_PROGRESS`、`CHANGED`、`SHRINK`）拒绝。若标记在调用中途追加（checkpoint 工具在自身的 tool-call 与结果之间运行），该结果会成为标记后的孤立节点；选区只跳过这一个节点，使 checkpoint 调用自身的配对保持可见，折叠从随后的探索开始。与 checkpoint 并行发出的探索调用（同一 assistant 消息）也会把结果留在标记之后；这些节点会被折叠，因此并行探索绝不会塌缩成空区域。
+- `rewind` 工具 —— 无参数 → `{ checkpointSeq, foldedNodes, start, end, foldedChars, reportChars }`，其中 `foldedChars` 是折叠区域贡献的模型可见文本（助手文本、推理、工具参数与工具输出），`reportChars` 是替换报告的字符数 —— 收缩判定数据在每个结果与错误中可见。渲染意图：generic 卡片。
 - **回合守卫** —— 当最近的 `checkpoint/mark` 尚未折叠时，`agent/turn-stopping` 会向 agent 的 next-step 收件箱注入常驻警告（每个 agent 每个回合一次），使回合无法在 `rewind` 折叠探索之前结束。合理失败的 rewind（如空区域）不会把回合困在警告循环里。
 
 ## 模型体验
@@ -56,7 +56,7 @@
 
 ## 已知限制与待办
 
-- **收缩检查基于字符** —— 报告必须比折叠区域的文本更短（按字符而非 token 度量）；基于 token 计量的检查会更精确。
+- **收缩检查基于字符** —— 报告必须比折叠区域的模型可见文本更短（按字符而非 token 度量）；度量标准统计模型读取的每个 block：助手/用户文本、推理、工具参数与工具输出（递归）。基于 token 计量的检查会更精确；图片 block 没有文本度量标准，保守忽略。
 - **无 `off` reasoning effort 路由上的空补全** —— 此类路由保留默认 thinking；若 thinking 耗尽 `maxTokens`，补全为空，只有重试预算能挽救折叠。
 - **每个标记只能折叠一次** —— 对同一标记二次折叠会因区域为空而被拒绝；新探索需要新的 `checkpoint`。
 - **探索中途发生自动压缩** —— 若 `rewind` 运行前自动压缩遮蔽了探索的一部分，折叠覆盖表面剩余部分；仅日志的标记在两种情况下都存活。

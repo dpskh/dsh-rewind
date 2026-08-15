@@ -239,6 +239,40 @@ describe('region selection', () => {
     expect(() => selectFoldRegion(session, mark.seq)).toThrow(/no surface nodes between the checkpoint/)
   })
 
+  it('folds an exploration issued in parallel with the checkpoint call', () => {
+    // The model emits the checkpoint and an exploration call in ONE assistant
+    // message (parallel tool calls); the mark lands between the checkpoint
+    // call and its result, and the exploration result follows. Selection must
+    // skip only the checkpoint's orphaned result and fold the exploration's
+    // own nodes — never report an empty region.
+    const session = Session.create(SessionId('parallel'))
+    session.append('turn/start', { turn: 1 })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'Explore it' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createMessage({
+        role: 'assistant',
+        content: [
+          { type: 'tool-call', id: CallId('c1'), name: 'checkpoint', arguments: '{}' },
+          { type: 'tool-call', id: CallId('c2'), name: 'bash', arguments: '{"command":"probe"}' },
+        ],
+        source: { kind: 'model', provider: MODEL, model: MODEL },
+      }),
+    }, { surfaceOp: 'append' })
+    session.append('checkpoint/mark', { turn: 1 })
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: CallId('c1'), content: [{ type: 'text', text: 'marked' }], isError: false }) }, { surfaceOp: 'append' })
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: CallId('c2'), content: [{ type: 'text', text: 'probe output' }], isError: false }) }, { surfaceOp: 'append' })
+    session.append('assistant/message', { turn: 1, step: 2, message: toolCallMessage('c3', 'rewind') }, { surfaceOp: 'append' })
+    const mark = findLatestMark(session.events)!
+    const region = selectFoldRegion(session, mark.seq)
+    // The checkpoint call's orphaned result (seq 4) stays visible; the
+    // exploration result (seq 5) is the fold.
+    expect(region.shadowedSeqs).toEqual([5])
+  })
+
   it('rejects when an orphaned result is the only node after the mark', () => {
     const session = Session.create(SessionId('lone-result'))
     session.append('turn/start', { turn: 1 })
@@ -298,16 +332,18 @@ describe('rewind service', () => {
   })
 
   it('folds the exploration into an auto-generated report', async () => {
-    const { ctx } = await setup(textChunks('## Findings\n- root cause is X'))
+    const { ctx } = await setup(textChunks('## Findings\n- X'))
     const session = explorationSession()
     const result = await ctx.rewind.rewind(agentWithSession(session, { provider: MODEL, model: MODEL }), SIGNAL)
-    expect(result).toEqual({ checkpointSeq: 4, foldedNodes: 2, start: 5, end: 6 })
+    // The region is the bash call (arguments '{}' = 2 chars) plus its result
+    // ('exploration output line' = 23 chars): 25 model-visible chars total.
+    expect(result).toEqual({ checkpointSeq: 4, foldedNodes: 2, start: 5, end: 6, foldedChars: 25, reportChars: 15 })
 
     const types = session.events.map(e => e.type)
     expect(types).toContain('checkpoint/fold-start')
     expect(types).toContain('checkpoint/fold-end')
     const record = session.events.find(e => e.type === 'checkpoint/rewind')
-    expect(record?.data.report).toBe('## Findings\n- root cause is X')
+    expect(record?.data.report).toBe('## Findings\n- X')
     expect(record?.data.checkpointSeq).toBe(4)
     expect(record?.data.shadowedSeqs).toEqual([5, 6])
     expect(record?.data.shadowedRange).toEqual({ start: 5, end: 6 })
@@ -318,7 +354,7 @@ describe('rewind service', () => {
     const messages = session.deriveMessages()
     expect(messages.map(m => m.content)).toEqual([
       [{ type: 'text', text: 'Find the cause' }],
-      [{ type: 'text', text: '## Findings\n- root cause is X' }],
+      [{ type: 'text', text: '## Findings\n- X' }],
       [{ type: 'tool-call', id: CallId('c2'), name: 'rewind', arguments: '{}' }],
     ])
   })
@@ -418,11 +454,21 @@ describe('rewind service', () => {
     const session = Session.create(SessionId('toolonly'))
     session.append('turn/start', { turn: 1 })
     session.append('checkpoint/mark', { turn: 1 })
-    session.append('assistant/message', { turn: 1, step: 1, message: toolCallMessage('c1', 'bash') }, { surfaceOp: 'append' })
+    // A tool call with empty arguments and an empty result contributes no
+    // model-visible text, so the region's char yardstick is zero and the
+    // shrink check has nothing to compare (no false SHRINK rejection).
+    session.append('assistant/message', {
+      turn: 1, step: 1,
+      message: createMessage({
+        role: 'assistant',
+        content: [{ type: 'tool-call', id: CallId('c1'), name: 'bash', arguments: '' }],
+        source: { kind: 'model', provider: MODEL, model: MODEL },
+      }),
+    }, { surfaceOp: 'append' })
     session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: CallId('c1'), content: [], isError: false }) }, { surfaceOp: 'append' })
     session.append('assistant/message', { turn: 1, step: 2, message: toolCallMessage('c2', 'rewind') }, { surfaceOp: 'append' })
     await expect(ctx.rewind.rewind(agentWithSession(session, { provider: MODEL, model: MODEL }), SIGNAL))
-      .resolves.toMatchObject({ foldedNodes: 2 })
+      .resolves.toMatchObject({ foldedNodes: 2, foldedChars: 0, reportChars: 6 })
   })
 
   it('records a fold-end with the error when summarization fails', async () => {
@@ -628,10 +674,10 @@ describe('rewind tool', () => {
     const ctx = await setupTools(textChunks('report'))
     const def = ctx.tools.get('rewind')!
     expect(def.presentCall?.({})).toEqual({ card: 'generic', title: 'Rewind', kind: 'other' })
-    const rendered = def.output.render({}, { checkpointSeq: 4, foldedNodes: 2, start: 5, end: 6 })
-    expect(rendered).toEqual([{ type: 'text', text: 'Folded 2 surface nodes (seq 5..6) into an auto-generated report.' }])
-    const single = def.output.render({}, { checkpointSeq: 1, foldedNodes: 1, start: 2, end: 2 })
-    expect(single).toEqual([{ type: 'text', text: 'Folded 1 surface node (seq 2..2) into an auto-generated report.' }])
+    const rendered = def.output.render({}, { checkpointSeq: 4, foldedNodes: 2, start: 5, end: 6, foldedChars: 25, reportChars: 15 })
+    expect(rendered).toEqual([{ type: 'text', text: 'Folded 2 surface nodes (seq 5..6, 25 chars) into an auto-generated report (15 chars).' }])
+    const single = def.output.render({}, { checkpointSeq: 1, foldedNodes: 1, start: 2, end: 2, foldedChars: 0, reportChars: 0 })
+    expect(single).toEqual([{ type: 'text', text: 'Folded 1 surface node (seq 2..2, 0 chars) into an auto-generated report (0 chars).' }])
   })
 
   it('registers the fold-discipline prompt section', async () => {

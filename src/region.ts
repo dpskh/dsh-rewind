@@ -106,9 +106,14 @@ export function assertNoActiveFold(events: readonly SessionEvent[]): void {
  * message carrying the rewind call itself, which is never folded). A mark
  * appended mid-call — the checkpoint tool runs between its own assistant
  * tool-call and tool/result — leaves an orphaned result as the first node
- * after the mark; selection skips past such nodes to the next balanced cut,
- * so the fold never splits the checkpoint call's own pair. The region must
- * be non-empty and its boundaries must not split a tool-call/result pair.
+ * after the mark; selection skips exactly that node, so the checkpoint call's
+ * own pair stays visible and the fold starts at the exploration that follows.
+ * Parallel tool calls issued alongside the checkpoint (same assistant message)
+ * put further nodes after the mark; those belong to the exploration and are
+ * folded even though their leading cut is unbalanced, so a fold never
+ * collapses to an empty region just because the exploration ran in parallel
+ * with the checkpoint call. The region must be non-empty and its trailing
+ * boundary must not split a tool-call/result pair.
  * @param session - the session whose surface to fold.
  * @param markSeq - seq of the `checkpoint/mark` the fold starts after.
  * @returns the validated inclusive surface span.
@@ -121,9 +126,14 @@ export function selectFoldRegion(session: Session, markSeq: number): FoldRegion 
   if (startIdx === -1) {
     throw new RewindError('EMPTY_REGION', 'rewind: no surface nodes after the checkpoint mark')
   }
-  while (startIdx < nodes.length) {
-    /* oxlint-disable-next-line typescript/no-non-null-assertion -- startIdx is clamped to nodes.length, so the node exists */
-    if (toolPairingBalancedBefore(session, nodes[startIdx]!)) break
+  // The mark lands between the checkpoint call's own tool-call and result, so
+  // the first node after it is that orphaned result with an unbalanced leading
+  // cut. Skip exactly that node. Do NOT skip ahead to the next balanced cut:
+  // parallel exploration calls issued in the same assistant message as the
+  // checkpoint leave their results behind the mark too, and skipping to a
+  // balanced cut would jump past the whole exploration to the rewind call.
+  /* oxlint-disable-next-line typescript/no-non-null-assertion -- startIdx is clamped to nodes.length, so the node exists */
+  if (startIdx < nodes.length && !toolPairingBalancedBefore(session, nodes[startIdx]!)) {
     startIdx += 1
   }
   const events = session.events

@@ -64,11 +64,13 @@ export function apply(ctx: Context, config: ToolConfig): void {
           foldedNodes: { type: 'integer', required: true },
           start: { type: 'integer', required: true },
           end: { type: 'integer', required: true },
+          foldedChars: { type: 'integer', required: true },
+          reportChars: { type: 'integer', required: true },
         },
       },
       render: (_args, value) => [{
         type: 'text',
-        text: `Folded ${value.foldedNodes} surface node${value.foldedNodes === 1 ? '' : 's'} (seq ${value.start}..${value.end}) into an auto-generated report.`,
+        text: `Folded ${value.foldedNodes} surface node${value.foldedNodes === 1 ? '' : 's'} (seq ${value.start}..${value.end}, ${value.foldedChars} chars) into an auto-generated report (${value.reportChars} chars).`,
       }],
     },
     execute: async (_args, exec) => {

@@ -56,6 +56,10 @@ export interface RewindResult {
   start: number
   /** Inclusive last folded surface-node seq. */
   end: number
+  /** Model-visible text chars the folded region contributed (the shrink yardstick). */
+  foldedChars: number
+  /** Report chars that replaced the region. */
+  reportChars: number
 }
 
 /**
@@ -122,7 +126,7 @@ export class RewindService extends Service {
       if (foldedText > 0 && summary.report.length >= foldedText) {
         throw new RewindError(
           'SHRINK',
-          `rewind summary (${summary.report.length} chars) is not smaller than the folded region (${foldedText} chars)`,
+          `rewind summary (${summary.report.length} chars) is not smaller than the folded region (${foldedText} chars over ${region.shadowedSeqs.length} nodes)`,
         )
       }
       // Synchronous commit: no await between the record and the bracket close.
@@ -150,6 +154,8 @@ export class RewindService extends Service {
         foldedNodes: region.shadowedSeqs.length,
         start: region.start,
         end: region.end,
+        foldedChars: foldedText,
+        reportChars: summary.report.length,
       }
     } catch (error) {
       /* v8 ignore next 1 -- closed stays false on every throwing path: nothing after the commit block can throw */
