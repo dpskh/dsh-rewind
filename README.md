@@ -1,6 +1,11 @@
-# @dpskh/tool-rewind — exploration fold for the DeepSeek Harness
+<center>
+<h1>@dpskh/tool-rewind — exploration fold for the DeepSeek Harness</h1>
 
 English | [中文](README.zh.md)
+
+[![dshfind](https://dshfind.com/api/card/dpskh/dsh-rewind?lang=zh)](https://dshfind.com/zh/plugins/dpskh/dsh-rewind?ref=badge)
+
+</center>
 
 One package, one entry plugin. Mounting `@dpskh/tool-rewind` provides `ctx.rewind` (a service that folds everything since the most recent `checkpoint/mark` into an auto-generated report) and the model-facing `rewind` tool over it. The fold shadows the exploration's surface range with the report — the same `surfaceOp: { op: 'replace' }` mechanism the DeepSeek Harness compaction seam uses — so subsequent requests no longer carry the exploration's intermediate steps (reads, searches, experiments), while the durable log keeps the full exploration for audit. The report is produced by `ctx.llm` (auto-generated); the marker comes from the sibling [`@dpskh/tool-checkpoint`](https://github.com/dsh-external/dsh-checkpoint) plugin. No upstream package is modified.
 

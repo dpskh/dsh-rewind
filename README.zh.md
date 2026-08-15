@@ -1,6 +1,11 @@
-# @dpskh/tool-rewind —— DeepSeek Harness 的探索折叠插件
+<center>
+<h1>@dpskh/tool-rewind —— DeepSeek Harness 的探索折叠插件</h1>
 
 [English](README.md) | 中文
+
+[![dshfind](https://dshfind.com/api/card/dpskh/dsh-rewind?lang=zh)](https://dshfind.com/zh/plugins/dpskh/dsh-rewind?ref=badge)
+
+</center>
 
 一个包、一个入口插件。挂载 `@dpskh/tool-rewind` 提供 `ctx.rewind`（把最近一次 `checkpoint/mark` 之后的一切折叠成自动生成报告的服务）和基于它的模型侧 `rewind` 工具。折叠用报告遮蔽探索的表面区间 —— 与 DeepSeek Harness 压缩接缝相同的 `surfaceOp: { op: 'replace' }` 机制 —— 使后续请求不再携带探索的中间步骤（读文件、搜索、试验），而持久日志完整保留探索过程供审计。报告由 `ctx.llm` 自动生成；标记来自兄弟插件 [`@dpskh/tool-checkpoint`](https://github.com/dsh-external/dsh-checkpoint)。不修改任何上游包。
 
