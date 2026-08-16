@@ -2,7 +2,7 @@
   "name": "@dpskh/tool-rewind",
   "private": true,
   "description": "Exploration-fold plugin for the DeepSeek Harness: folds everything since the most recent checkpoint mark (recorded by the @dpskh/tool-checkpoint plugin in its storage domain) into an auto-generated report, replacing the exploration's noisy middle in the model-visible surface while the durable log keeps the full exploration for audit; writes only core-vocabulary session events",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
