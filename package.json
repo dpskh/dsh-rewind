@@ -1,7 +1,7 @@
 {
   "name": "@dpskh/tool-rewind",
   "private": true,
-  "description": "Exploration-fold plugin for the DeepSeek Harness: folds everything since the most recent checkpoint/mark (appended by the @dpskh/tool-checkpoint plugin) into an auto-generated report, replacing the exploration's noisy middle in the model-visible surface while the durable log keeps the full exploration for audit",
+  "description": "Exploration-fold plugin for the DeepSeek Harness: folds everything since the most recent checkpoint mark (recorded by the @dpskh/tool-checkpoint plugin in its storage domain) into an auto-generated report, replacing the exploration's noisy middle in the model-visible surface while the durable log keeps the full exploration for audit; writes only core-vocabulary session events",
   "version": "0.1.0",
   "type": "module",
   "main": "lib/index.js",
@@ -11,16 +11,11 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./invariant": {
-      "types": "./lib/types/invariant.d.ts",
-      "default": "./lib/invariant.js"
-    },
     "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
   "files": [
     "lib/index.js",
-    "lib/invariant.js",
     "lib/types/**/*.js",
     "lib/types/**/*.d.ts",
     "lib/types/**/*.d.ts.map",
@@ -37,7 +32,6 @@
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-compaction": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-invariants": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-session": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6",
@@ -47,11 +41,14 @@
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "devDependencies": {
+    "@dpskh/tool-checkpoint": "workspace:^",
     "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-compaction": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-invariants": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-session": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-storage": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-storage-domain": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-storage-sqlite": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
     "@types/node": "^24.0.0",

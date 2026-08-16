@@ -1,16 +1,20 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import Storage from '@deepseek-ai/dsh-storage'
+import { SqliteStorageBackend } from '@deepseek-ai/dsh-storage-sqlite'
+import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
 import LlmService, { CallId, LlmAdapter, ReasoningEffortId, createMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmResolvedModelInfo, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import * as checkpointTool from '@dpskh/tool-checkpoint'
 
 import { isRewindReportSource } from '../src/brand.ts'
 import { REWIND_GUARD_SOURCE, REWIND_GUARD_TEXT } from '../src/guard.ts'
-import { RewindError, assertNoActiveFold, assertRegionUnchanged, findLatestMark, hasActiveCheckpoint, openTurnOf, selectFoldRegion } from '../src/region.ts'
+import { RewindError, assertRegionUnchanged, selectFoldRegion } from '../src/region.ts'
 import { buildSummarizationInput, summarizeRegion } from '../src/summarize.ts'
 import { RewindService } from '../src/index.ts'
 import * as tool from '../src/index.ts'
@@ -38,11 +42,20 @@ function toolCallMessage(callId: string, name: string) {
 }
 
 /**
- * A session in the middle of an exploration: the checkpoint mark sits after
+ * A session in the middle of an exploration: a checkpoint mark sits after
  * the user's request, the exploration is one bash call with its result, and
  * the current step's assistant message carries the rewind call itself.
  * Surface nodes: [user/message, assistant(bash), tool/result, assistant(rewind)].
+ *
+ * The mark itself is not a session event — it lives in the checkpoint
+ * storage domain, recorded by the caller (typically through
+ * `ctx.checkpoint.mark`) at the moment the session reaches the marked
+ * position. `EXPLORATION_MARK_LOG_LENGTH` is the log length at that moment
+ * (4: seqs 0-3 are present), i.e. the fold anchor: every surface node with
+ * `seq >= 4` came after the mark.
  */
+const EXPLORATION_MARK_LOG_LENGTH = 4
+
 function explorationSession(): Session {
   const session = Session.create(SessionId('explore'))
   session.append('turn/start', { turn: 1 })
@@ -52,7 +65,34 @@ function explorationSession(): Session {
   }), { surfaceOp: 'append' })
   session.append('step/start', { turn: 1, step: 1 })
   session.append('request/header', { header: { config: { provider: MODEL, model: MODEL } }, reason: 'initial' })
-  session.append('checkpoint/mark', { turn: 1, objective: 'explore the failure' })
+  session.append('assistant/message', { turn: 1, step: 1, message: toolCallMessage('c1', 'bash') }, { surfaceOp: 'append' })
+  session.append('tool/result', {
+    turn: 1,
+    step: 1,
+    message: createToolResultMessage({ callId: CallId('c1'), content: [{ type: 'text', text: 'exploration output line' }], isError: false }),
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 1 })
+  session.append('step/start', { turn: 1, step: 2 })
+  session.append('assistant/message', { turn: 1, step: 2, message: toolCallMessage('c2', 'rewind') }, { surfaceOp: 'append' })
+  return session
+}
+
+/**
+ * Build the exploration session with a REAL mark recorded through the
+ * checkpoint service at the marked position: the mark lands after the
+ * user request and request header, before the exploration's bash call —
+ * exactly where the `checkpoint` tool runs in a live loop.
+ */
+async function markedExplorationSession(ctx: Context, objective?: string): Promise<Session> {
+  const session = Session.create(SessionId('explore'))
+  session.append('turn/start', { turn: 1 })
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: 'Find the cause' }],
+    source: { kind: 'user' },
+  }), { surfaceOp: 'append' })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('request/header', { header: { config: { provider: MODEL, model: MODEL } }, reason: 'initial' })
+  await ctx.checkpoint.mark(session, objective)
   session.append('assistant/message', { turn: 1, step: 1, message: toolCallMessage('c1', 'bash') }, { surfaceOp: 'append' })
   session.append('tool/result', {
     turn: 1,
@@ -121,13 +161,25 @@ function textChunks(text: string): StreamChunk[] {
   ]
 }
 
+/** Mount the storage stack manually (the workspace-spec pattern). */
+async function mountStorage(ctx: Context): Promise<void> {
+  await ctx.plugin(Storage)
+  const backend = new SqliteStorageBackend({ path: ':memory:', journalMode: 'wal' })
+  ctx.storage.backend.register('sqlite', backend)
+  const facility = new DomainFacility(ctx, { backend: 'sqlite' })
+  ctx.storage.mount('domain', facility)
+  ctx.provide('storageDomain', facility)
+}
+
 async function setup(
   chunks: StreamChunk[],
   config: Partial<Config> = {},
 ): Promise<{ ctx: Context; adapter: ScriptedAdapter }> {
   const ctx = new Context()
+  await mountStorage(ctx)
   await ctx.plugin(LlmService)
   await ctx.plugin(SystemPrompt)
+  await ctx.plugin(checkpointTool)
   const adapter = new ScriptedAdapter(chunks)
   ctx.llm.registerAdapter([MODEL, 'other'], adapter)
   // Partial is fine at the mount boundary: the plugin Config schema applies
@@ -136,34 +188,28 @@ async function setup(
   return { ctx, adapter }
 }
 
+/** Record a mark for the session through the real checkpoint service. */
+async function mark(ctx: Context, session: Session, objective?: string): Promise<void> {
+  await ctx.checkpoint.mark(session, objective)
+}
+
 describe('region selection', () => {
-  it('finds the latest checkpoint mark', () => {
+  it('selects the balanced span after the mark anchor, excluding the rewind call', () => {
     const session = explorationSession()
-    const marks = session.events.filter(e => e.type === 'checkpoint/mark')
-    expect(marks).toHaveLength(1)
-    expect(findLatestMark(session.events)?.seq).toBe(marks[0]!.seq)
-    expect(findLatestMark(Session.create(SessionId('empty')).events)).toBeUndefined()
+    const region = selectFoldRegion(session, EXPLORATION_MARK_LOG_LENGTH)
+    expect(region.start).toBe(4)
+    expect(region.end).toBe(5)
+    expect(region.shadowedSeqs).toEqual([4, 5])
   })
 
-  it('selects the balanced span after the mark, excluding the rewind call', () => {
-    const session = explorationSession()
-    const mark = findLatestMark(session.events)!
-    const region = selectFoldRegion(session, mark.seq)
-    expect(region.start).toBe(5)
-    expect(region.end).toBe(6)
-    expect(region.shadowedSeqs).toEqual([5, 6])
-  })
-
-  it('rejects a fold with no mark or nothing after it', () => {
+  it('rejects a fold with nothing after the anchor', () => {
     const bare = Session.create(SessionId('bare'))
     expect(() => selectFoldRegion(bare, 0)).toThrow(RewindError)
     expect(() => selectFoldRegion(bare, 0)).toThrow(/no surface nodes after the checkpoint/)
 
+    // An anchor at the end of the log: nothing after it.
     const session = explorationSession()
-    // A mark appended last: nothing after it.
-    session.append('checkpoint/mark', { turn: 1 })
-    const mark = findLatestMark(session.events)!
-    expect(() => selectFoldRegion(session, mark.seq)).toThrow(/no surface nodes after the checkpoint/)
+    expect(() => selectFoldRegion(session, session.events.length)).toThrow(/no surface nodes after the checkpoint/)
   })
 
   it('rejects a fold with nothing between the mark and the rewind call', () => {
@@ -174,20 +220,18 @@ describe('region selection', () => {
       content: [{ type: 'text', text: 'Find the cause' }],
       source: { kind: 'user' },
     }), { surfaceOp: 'append' })
-    tight.append('checkpoint/mark', { turn: 1 })
+    const anchor = tight.events.length
     tight.append('assistant/message', { turn: 1, step: 1, message: toolCallMessage('c2', 'rewind') }, { surfaceOp: 'append' })
-    const mark = findLatestMark(tight.events)!
-    expect(() => selectFoldRegion(tight, mark.seq)).toThrow(/no surface nodes between the checkpoint/)
+    expect(() => selectFoldRegion(tight, anchor)).toThrow(/no surface nodes between the checkpoint/)
   })
 
   it('rejects an unbalanced region whose open tool call never resolves', () => {
     const session = Session.create(SessionId('unbalanced'))
     session.append('turn/start', { turn: 1 })
-    session.append('checkpoint/mark', { turn: 1 })
+    const anchor = session.events.length
     session.append('assistant/message', { turn: 1, step: 1, message: toolCallMessage('c1', 'bash') }, { surfaceOp: 'append' })
     session.append('assistant/message', { turn: 1, step: 2, message: toolCallMessage('c2', 'rewind') }, { surfaceOp: 'append' })
-    const mark = findLatestMark(session.events)!
-    expect(() => selectFoldRegion(session, mark.seq)).toThrow(/balanced boundary/)
+    expect(() => selectFoldRegion(session, anchor)).toThrow(/balanced boundary/)
   })
 
   it('folds an exploration whose checkpoint call spans the mark', () => {
@@ -201,23 +245,21 @@ describe('region selection', () => {
       source: { kind: 'user' },
     }), { surfaceOp: 'append' })
     session.append('assistant/message', { turn: 1, step: 1, message: toolCallMessage('c1', 'checkpoint') }, { surfaceOp: 'append' })
-    session.append('checkpoint/mark', { turn: 1 })
-    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: CallId('c1'), content: [{ type: 'text', text: '{"seq":2}' }], isError: false }) }, { surfaceOp: 'append' })
+    const anchor = session.events.length
+    session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: CallId('c1'), content: [{ type: 'text', text: '{"id":1}' }], isError: false }) }, { surfaceOp: 'append' })
     session.append('assistant/message', { turn: 1, step: 2, message: toolCallMessage('c2', 'bash') }, { surfaceOp: 'append' })
     session.append('tool/result', { turn: 1, step: 2, message: createToolResultMessage({ callId: CallId('c2'), content: [{ type: 'text', text: 'exploration output line' }], isError: false }) }, { surfaceOp: 'append' })
     session.append('assistant/message', { turn: 1, step: 3, message: toolCallMessage('c3', 'rewind') }, { surfaceOp: 'append' })
-    const mark = findLatestMark(session.events)!
-    const region = selectFoldRegion(session, mark.seq)
-    expect(region.shadowedSeqs).toEqual([5, 6])
+    const region = selectFoldRegion(session, anchor)
+    expect(region.shadowedSeqs).toEqual([4, 5])
     // The checkpoint call's own pair stays outside the fold and model-visible.
-    expect(region.start).toBe(5)
-    expect(region.end).toBe(6)
+    expect(region.start).toBe(4)
+    expect(region.end).toBe(5)
   })
 
   it('skips an orphaned result and folds nothing when only the rewind call follows', () => {
     const session = Session.create(SessionId('splitstart'))
     session.append('turn/start', { turn: 1 })
-    session.append('checkpoint/mark', { turn: 1 })
     // The assistant requests TWO calls; only the first resolves before the
     // second mark, so the region after it starts at an unmatched result.
     session.append('assistant/message', {
@@ -232,11 +274,10 @@ describe('region selection', () => {
       }),
     }, { surfaceOp: 'append' })
     session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: CallId('c1'), content: [], isError: false }) }, { surfaceOp: 'append' })
-    session.append('checkpoint/mark', { turn: 1 })
+    const anchor = session.events.length
     session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: CallId('c2'), content: [], isError: false }) }, { surfaceOp: 'append' })
     session.append('assistant/message', { turn: 1, step: 2, message: toolCallMessage('c3', 'rewind') }, { surfaceOp: 'append' })
-    const mark = findLatestMark(session.events)!
-    expect(() => selectFoldRegion(session, mark.seq)).toThrow(/no surface nodes between the checkpoint/)
+    expect(() => selectFoldRegion(session, anchor)).toThrow(/no surface nodes between the checkpoint/)
   })
 
   it('folds an exploration issued in parallel with the checkpoint call', () => {
@@ -262,60 +303,41 @@ describe('region selection', () => {
         source: { kind: 'model', provider: MODEL, model: MODEL },
       }),
     }, { surfaceOp: 'append' })
-    session.append('checkpoint/mark', { turn: 1 })
+    const anchor = session.events.length
     session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: CallId('c1'), content: [{ type: 'text', text: 'marked' }], isError: false }) }, { surfaceOp: 'append' })
     session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: CallId('c2'), content: [{ type: 'text', text: 'probe output' }], isError: false }) }, { surfaceOp: 'append' })
     session.append('assistant/message', { turn: 1, step: 2, message: toolCallMessage('c3', 'rewind') }, { surfaceOp: 'append' })
-    const mark = findLatestMark(session.events)!
-    const region = selectFoldRegion(session, mark.seq)
-    // The checkpoint call's orphaned result (seq 4) stays visible; the
-    // exploration result (seq 5) is the fold.
-    expect(region.shadowedSeqs).toEqual([5])
+    const region = selectFoldRegion(session, anchor)
+    // The checkpoint call's orphaned result (seq 3) stays visible; the
+    // exploration result (seq 4) is the fold.
+    expect(region.shadowedSeqs).toEqual([4])
   })
 
   it('rejects when an orphaned result is the only node after the mark', () => {
     const session = Session.create(SessionId('lone-result'))
     session.append('turn/start', { turn: 1 })
     session.append('assistant/message', { turn: 1, step: 1, message: toolCallMessage('c1', 'checkpoint') }, { surfaceOp: 'append' })
-    session.append('checkpoint/mark', { turn: 1 })
+    const anchor = session.events.length
     session.append('tool/result', { turn: 1, step: 1, message: createToolResultMessage({ callId: CallId('c1'), content: [], isError: false }) }, { surfaceOp: 'append' })
-    const mark = findLatestMark(session.events)!
-    expect(() => selectFoldRegion(session, mark.seq)).toThrow(/no surface nodes between the checkpoint/)
+    expect(() => selectFoldRegion(session, anchor)).toThrow(/no surface nodes between the checkpoint/)
   })
 
   it('folds to the surface tail when no assistant message exists yet', () => {
     const session = Session.create(SessionId('noassistant'))
-    session.append('checkpoint/mark', { turn: null })
     session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'a' }],
       source: { kind: 'user' },
     }), { surfaceOp: 'append' })
     const region = selectFoldRegion(session, 0)
-    expect(region.shadowedSeqs).toEqual([1])
+    expect(region.shadowedSeqs).toEqual([0])
   })
 
-  it('asserts the fold lock bracket and the region stability', () => {
+  it('asserts the region stability', () => {
     const session = explorationSession()
-    expect(() =>{  assertNoActiveFold(session.events) }).not.toThrow()
-    session.append('checkpoint/fold-start', { turn: 1 })
-    expect(() =>{  assertNoActiveFold(session.events) }).toThrow(/fold is already in progress/)
-    session.append('checkpoint/fold-end', { turn: 1 })
-    expect(() =>{  assertNoActiveFold(session.events) }).not.toThrow()
-
-    const mark = findLatestMark(session.events)!
-    const region = selectFoldRegion(session, mark.seq)
-    expect(() =>{  assertRegionUnchanged(session, mark.seq, region) }).not.toThrow()
-    expect(() =>{  assertRegionUnchanged(session, mark.seq, { ...region, end: region.end + 1 }) })
+    const region = selectFoldRegion(session, EXPLORATION_MARK_LOG_LENGTH)
+    expect(() => { assertRegionUnchanged(session, EXPLORATION_MARK_LOG_LENGTH, region) }).not.toThrow()
+    expect(() => { assertRegionUnchanged(session, EXPLORATION_MARK_LOG_LENGTH, { ...region, end: region.end + 1 }) })
       .toThrow(/changed during summarization/)
-  })
-
-  it('tracks the open turn across boundaries', () => {
-    const session = Session.create(SessionId('turns'))
-    expect(openTurnOf(session.events)).toBeNull()
-    session.append('turn/start', { turn: 7 })
-    expect(openTurnOf(session.events)).toBe(7)
-    session.append('turn/end', { turn: 7, reason: { kind: 'completed' } })
-    expect(openTurnOf(session.events)).toBeNull()
   })
 })
 
@@ -333,24 +355,21 @@ describe('rewind service', () => {
 
   it('folds the exploration into an auto-generated report', async () => {
     const { ctx } = await setup(textChunks('## Findings\n- X'))
-    const session = explorationSession()
+    const session = await markedExplorationSession(ctx, 'explore the failure')
     const result = await ctx.rewind.rewind(agentWithSession(session, { provider: MODEL, model: MODEL }), SIGNAL)
     // The region is the bash call (arguments '{}' = 2 chars) plus its result
     // ('exploration output line' = 23 chars): 25 model-visible chars total.
-    expect(result).toEqual({ checkpointSeq: 4, foldedNodes: 2, start: 5, end: 6, foldedChars: 25, reportChars: 15 })
+    expect(result).toEqual({ markId: 1, foldedNodes: 2, start: 4, end: 5, foldedChars: 25, reportChars: 15 })
 
-    const types = session.events.map(e => e.type)
-    expect(types).toContain('checkpoint/fold-start')
-    expect(types).toContain('checkpoint/fold-end')
-    const record = session.events.find(e => e.type === 'checkpoint/rewind')
-    expect(record?.data.report).toBe('## Findings\n- X')
-    expect(record?.data.checkpointSeq).toBe(4)
-    expect(record?.data.shadowedSeqs).toEqual([5, 6])
-    expect(record?.data.shadowedRange).toEqual({ start: 5, end: 6 })
+    // No plugin events enter the session log: only the core-vocabulary
+    // replacement message is appended.
+    expect(session.events.some(e => e.type.startsWith('checkpoint/'))).toBe(false)
+    const stored = await ctx.checkpoint.latestMark(session.id)
+    expect(stored?.foldedAt).not.toBeNull()
 
     const report = session.events.find(e => e.type === 'user/message'
       && e.data.source.kind === 'plugin' && e.data.source.plugin === 'rewind') as SessionEvent<'user/message'> | undefined
-    expect(report?.surfaceOp).toEqual({ op: 'replace', start: 5, end: 6 })
+    expect(report?.surfaceOp).toEqual({ op: 'replace', start: 4, end: 5 })
     const messages = session.deriveMessages()
     expect(messages.map(m => m.content)).toEqual([
       [{ type: 'text', text: 'Find the cause' }],
@@ -359,22 +378,24 @@ describe('rewind service', () => {
     ])
   })
 
-  it('records provider usage in the rewind provenance', async () => {
+  it('completes the fold and stamps the mark folded', async () => {
     const chunks: StreamChunk[] = [
       ...textChunks('report').slice(0, 3),
       { type: 'usage', usage: { inputTokens: 1, outputTokens: 2 } },
       textChunks('report')[3]!,
     ]
     const { ctx } = await setup(chunks)
-    const session = explorationSession()
+    const session = await markedExplorationSession(ctx)
+    expect(await ctx.checkpoint.hasActive(session.id)).toBe(true)
     await ctx.rewind.rewind(agentWithSession(session, { provider: MODEL, model: MODEL }), SIGNAL)
-    const record = session.events.find(e => e.type === 'checkpoint/rewind')
-    expect(record?.data.usage).toEqual({ inputTokens: 1, outputTokens: 2 })
+    expect(await ctx.checkpoint.hasActive(session.id)).toBe(false)
+    const stored = await ctx.checkpoint.latestMark(session.id)
+    expect(stored?.foldedAt).not.toBeNull()
   })
 
   it('routes the summarization request to the routed or configured model', async () => {
     const { ctx, adapter } = await setup(textChunks('report'))
-    const session = explorationSession()
+    const session = await markedExplorationSession(ctx)
     await ctx.rewind.rewind(agentWithSession(session), SIGNAL)
     expect(adapter.requests).toHaveLength(1)
     expect(adapter.requests[0]!.provider).toBe(MODEL)
@@ -395,7 +416,7 @@ describe('rewind service', () => {
       reportLanguage: 'zh',
       maxTokens: 256,
     })
-    const session = explorationSession()
+    const session = await markedExplorationSession(ctx)
     await ctx.rewind.rewind(agentWithSession(session), SIGNAL)
     expect(adapter.requests[0]!.provider).toBe('other')
     expect(adapter.requests[0]!.maxTokens).toBe(256)
@@ -406,21 +427,21 @@ describe('rewind service', () => {
   it('rejects a fold without a checkpoint mark', async () => {
     const { ctx } = await setup(textChunks('report'))
     const session = Session.create(SessionId('bare'))
-    await expect(ctx.rewind.rewind(agentWithSession(session), SIGNAL)).rejects.toThrow(/no checkpoint\/mark/)
+    await expect(ctx.rewind.rewind(agentWithSession(session), SIGNAL)).rejects.toThrow(/no checkpoint mark/)
   })
 
   it('rejects a fold while another fold is in progress', async () => {
     const { ctx } = await setup(textChunks('report'))
-    const session = explorationSession()
-    session.append('checkpoint/fold-start', { turn: 1 })
-    await expect(ctx.rewind.rewind(agentWithSession(session), SIGNAL)).rejects.toThrow(/fold is already in progress/)
+    const session = await markedExplorationSession(ctx)
+    ;(ctx.rewind as unknown as { foldLocks: Set<SessionId> }).foldLocks.add(session.id)
+    await expect(ctx.rewind.rewind(agentWithSession(session), SIGNAL)).rejects.toThrow(/already in progress/)
   })
 
   it('rejects a summary that is not smaller than the folded region', async () => {
     const { ctx } = await setup(textChunks('x'.repeat(200)))
     const session = Session.create(SessionId('shrink'))
     session.append('turn/start', { turn: 1 })
-    session.append('checkpoint/mark', { turn: 1 })
+    await mark(ctx, session)
     session.append('assistant/message', {
       turn: 1, step: 1,
       message: createMessage({
@@ -437,7 +458,7 @@ describe('rewind service', () => {
     const { ctx } = await setup(textChunks('report'))
     const session = Session.create(SessionId('emptyassistant'))
     session.append('turn/start', { turn: 1 })
-    session.append('checkpoint/mark', { turn: 1 })
+    await mark(ctx, session)
     // An empty-content assistant/message derives to no LLM message (it only
     // hosts a max-tokens step's usage), so the summarization input skips it.
     session.append('assistant/message', {
@@ -453,7 +474,7 @@ describe('rewind service', () => {
     const { ctx } = await setup(textChunks('report'))
     const session = Session.create(SessionId('toolonly'))
     session.append('turn/start', { turn: 1 })
-    session.append('checkpoint/mark', { turn: 1 })
+    await mark(ctx, session)
     // A tool call with empty arguments and an empty result contributes no
     // model-visible text, so the region's char yardstick is zero and the
     // shrink check has nothing to compare (no false SHRINK rejection).
@@ -471,13 +492,12 @@ describe('rewind service', () => {
       .resolves.toMatchObject({ foldedNodes: 2, foldedChars: 0, reportChars: 6 })
   })
 
-  it('records a fold-end with the error when summarization fails', async () => {
+  it('keeps the mark active and writes nothing when summarization fails', async () => {
     const { ctx } = await setup([{ type: 'finish', reason: { kind: 'stop' } }], { maxSummarizationRetries: 0 })
-    const session = explorationSession()
+    const session = await markedExplorationSession(ctx)
     await expect(ctx.rewind.rewind(agentWithSession(session), SIGNAL)).rejects.toThrow(/no text report/)
-    const ends = session.events.filter(e => e.type === 'checkpoint/fold-end')
-    expect(ends).toHaveLength(1)
-    expect(ends[0]!.data.error).toMatch(/no text report/)
+    expect(session.events.some(e => e.type.startsWith('checkpoint/'))).toBe(false)
+    expect(await ctx.checkpoint.hasActive(session.id)).toBe(true)
   })
 
   it('retries an empty completion and succeeds on a later attempt', async () => {
@@ -486,13 +506,15 @@ describe('rewind service', () => {
       textChunks('report'),
     ])
     const ctx = new Context()
+    await mountStorage(ctx)
     await ctx.plugin(LlmService)
     await ctx.plugin(SystemPrompt)
+    await ctx.plugin(checkpointTool)
     ctx.llm.registerAdapter([MODEL], adapter)
     // Partial is fine at the mount boundary: the plugin Config schema applies
     // defaults for absent fields (exactOptionalPropertyTypes forbids the spread).
     await ctx.plugin(tool, {} as Config)
-    const session = explorationSession()
+    const session = await markedExplorationSession(ctx)
     await expect(ctx.rewind.rewind(agentWithSession(session, { provider: MODEL, model: MODEL }), SIGNAL))
       .resolves.toMatchObject({ foldedNodes: 2 })
     expect(adapter.requests).toHaveLength(2)
@@ -503,12 +525,11 @@ describe('rewind service', () => {
       [{ type: 'usage', usage: { inputTokens: 1, outputTokens: 1024, reasoningTokens: 1024 } }, { type: 'finish', reason: { kind: 'max-tokens' } }],
       { maxSummarizationRetries: 2 },
     )
-    const session = explorationSession()
+    const session = await markedExplorationSession(ctx)
     await expect(ctx.rewind.rewind(agentWithSession(session), SIGNAL))
       .rejects.toThrow(/no text report content after 2 retries \(finish: max-tokens, outputTokens: 1024, reasoningTokens: 1024\)/)
-    const ends = session.events.filter(e => e.type === 'checkpoint/fold-end')
-    expect(ends).toHaveLength(1)
-    expect(ends[0]!.data.error).toMatch(/finish: max-tokens/)
+    expect(session.events.some(e => e.type.startsWith('checkpoint/'))).toBe(false)
+    expect(await ctx.checkpoint.hasActive(session.id)).toBe(true)
     expect(adapter.requests).toHaveLength(3)
   })
 
@@ -517,7 +538,7 @@ describe('rewind service', () => {
       [{ type: 'usage', usage: { inputTokens: 1, outputTokens: 1024 } }, { type: 'finish', reason: { kind: 'max-tokens' } }],
       { maxSummarizationRetries: 0 },
     )
-    const session = explorationSession()
+    const session = await markedExplorationSession(ctx)
     await expect(ctx.rewind.rewind(agentWithSession(session), SIGNAL))
       .rejects.toThrow(/no text report content after 0 retries \(finish: max-tokens, outputTokens: 1024\)/)
   })
@@ -531,48 +552,49 @@ describe('rewind service', () => {
       defaultEffort: ReasoningEffortId('high'),
     })
     const ctx = new Context()
+    await mountStorage(ctx)
     await ctx.plugin(LlmService)
     await ctx.plugin(SystemPrompt)
+    await ctx.plugin(checkpointTool)
     ctx.llm.registerAdapter([MODEL], adapter)
     // Partial is fine at the mount boundary: the plugin Config schema applies
     // defaults for absent fields (exactOptionalPropertyTypes forbids the spread).
     await ctx.plugin(tool, {} as Config)
-    const session = explorationSession()
+    const session = await markedExplorationSession(ctx)
     await ctx.rewind.rewind(agentWithSession(session, { provider: MODEL, model: MODEL }), SIGNAL)
     expect(adapter.requests[0]!.reasoningEffort).toBe('off')
   })
 
   it('keeps the route default effort when no off effort is advertised', async () => {
     const { ctx, adapter } = await setup(textChunks('report'))
-    const session = explorationSession()
+    const session = await markedExplorationSession(ctx)
     await ctx.rewind.rewind(agentWithSession(session, { provider: MODEL, model: MODEL }), SIGNAL)
     expect(adapter.requests[0]!.reasoningEffort).toBeUndefined()
   })
 
-  it('records a fold-end when the summarization stream errors', async () => {
+  it('keeps the mark active and writes nothing when the summarization stream errors', async () => {
     const { ctx } = await setup([{ type: 'finish', reason: { kind: 'error', failure: { message: 'boom', code: 'E' } } }])
-    const session = explorationSession()
+    const session = await markedExplorationSession(ctx)
     await expect(ctx.rewind.rewind(agentWithSession(session, { provider: MODEL, model: MODEL }), SIGNAL))
       .rejects.toThrow(/stream ended with error/)
-    const ends = session.events.filter(e => e.type === 'checkpoint/fold-end')
-    expect(ends).toHaveLength(1)
-    expect(ends[0]!.data.error).toMatch(/stream ended with error/)
+    expect(session.events.some(e => e.type.startsWith('checkpoint/'))).toBe(false)
+    expect(await ctx.checkpoint.hasActive(session.id)).toBe(true)
   })
 
-  it('propagates a cancelled signal and closes the bracket', async () => {
+  it('propagates a cancelled signal and writes nothing', async () => {
     const { ctx } = await setup(textChunks('report'))
-    const session = explorationSession()
+    const session = await markedExplorationSession(ctx)
     const aborted = new AbortController()
     aborted.abort()
     await expect(ctx.rewind.rewind(agentWithSession(session), aborted.signal)).rejects.toBeDefined()
-    const ends = session.events.filter(e => e.type === 'checkpoint/fold-end')
-    expect(ends).toHaveLength(1)
+    expect(session.events.some(e => e.type.startsWith('checkpoint/'))).toBe(false)
+    expect(await ctx.checkpoint.hasActive(session.id)).toBe(true)
   })
 
   it('rejects when no provider/model can be resolved for summarization', async () => {
     const { ctx } = await setup(textChunks('report'))
     const session = Session.create(SessionId('nohost'))
-    session.append('checkpoint/mark', { turn: null })
+    await mark(ctx, session)
     session.append('user/message', createUserMessage({
       content: [{ type: 'text', text: 'explore' }],
       source: { kind: 'user' },
@@ -639,9 +661,11 @@ describe('summarizeRegion', () => {
 describe('rewind tool', () => {
   async function setupTools(chunks: StreamChunk[]): Promise<Context> {
     const ctx = new Context()
+    await mountStorage(ctx)
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRegistry)
     await ctx.plugin(LlmService)
+    await ctx.plugin(checkpointTool)
     const adapter = new ScriptedAdapter(chunks)
     ctx.llm.registerAdapter([MODEL], adapter)
     await ctx.plugin(tool)
@@ -663,20 +687,21 @@ describe('rewind tool', () => {
     const ctx = await setupTools(textChunks('## Findings\n- done'))
     const schema = ctx.tools.schemas().find(s => s.name === 'rewind')
     expect(schema).toBeDefined()
-    const session = explorationSession()
+    const session = await markedExplorationSession(ctx)
     const result = await callRewind(ctx, agentWithSession(session, { provider: MODEL, model: MODEL }))
     const text = result.content.filter(b => b.type === 'text').map(b => b.text).join('')
     expect(text).toMatch(/Folded 2 surface nodes/)
-    expect(session.events.some(e => e.type === 'checkpoint/rewind')).toBe(true)
+    expect(session.events.some(e => e.type.startsWith('checkpoint/'))).toBe(false)
+    expect(await ctx.checkpoint.hasActive(session.id)).toBe(false)
   })
 
   it('presents the call and the result with a stable generic card', async () => {
     const ctx = await setupTools(textChunks('report'))
     const def = ctx.tools.get('rewind')!
     expect(def.presentCall?.({})).toEqual({ card: 'generic', title: 'Rewind', kind: 'other' })
-    const rendered = def.output.render({}, { checkpointSeq: 4, foldedNodes: 2, start: 5, end: 6, foldedChars: 25, reportChars: 15 })
+    const rendered = def.output.render({}, { markId: 4, foldedNodes: 2, start: 5, end: 6, foldedChars: 25, reportChars: 15 })
     expect(rendered).toEqual([{ type: 'text', text: 'Folded 2 surface nodes (seq 5..6, 25 chars) into an auto-generated report (15 chars).' }])
-    const single = def.output.render({}, { checkpointSeq: 1, foldedNodes: 1, start: 2, end: 2, foldedChars: 0, reportChars: 0 })
+    const single = def.output.render({}, { markId: 1, foldedNodes: 1, start: 2, end: 2, foldedChars: 0, reportChars: 0 })
     expect(single).toEqual([{ type: 'text', text: 'Folded 1 surface node (seq 2..2, 0 chars) into an auto-generated report (0 chars).' }])
   })
 
@@ -707,75 +732,60 @@ describe('report source marker', () => {
 describe('turn guard', () => {
   async function setupGuard(): Promise<Context> {
     const ctx = new Context()
+    await mountStorage(ctx)
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRegistry)
     await ctx.plugin(LlmService)
+    await ctx.plugin(checkpointTool)
     const adapter = new ScriptedAdapter(textChunks('report'))
     ctx.llm.registerAdapter([MODEL], adapter)
     await ctx.plugin(tool)
     return ctx
   }
 
-  it('reports an active checkpoint from the log', () => {
+  it('reports an active checkpoint from the plugin storage', async () => {
+    const ctx = await setupGuard()
     const session = Session.create(SessionId('guard-state'))
     session.append('turn/start', { turn: 1 })
-    expect(hasActiveCheckpoint(session.events)).toBe(false)
-    const mark = session.append('checkpoint/mark', { turn: 1 })
-    expect(hasActiveCheckpoint(session.events)).toBe(true)
-    // A rewind record referencing a different (older) mark keeps it active.
-    session.append('checkpoint/rewind', {
-      turn: 1,
-      report: 'older fold',
-      checkpointSeq: mark.seq - 1,
-      shadowedRange: { start: 0, end: 0 },
-      shadowedSeqs: [],
-      provider: MODEL,
-      model: MODEL,
-    })
-    expect(hasActiveCheckpoint(session.events)).toBe(true)
-    // The record referencing the latest mark closes it.
-    session.append('checkpoint/rewind', {
-      turn: 1,
-      report: 'fold',
-      checkpointSeq: mark.seq,
-      shadowedRange: { start: 0, end: 0 },
-      shadowedSeqs: [],
-      provider: MODEL,
-      model: MODEL,
-    })
-    expect(hasActiveCheckpoint(session.events)).toBe(false)
+    expect(await ctx.checkpoint.hasActive(session.id)).toBe(false)
+    const { id } = await ctx.checkpoint.mark(session)
+    expect(await ctx.checkpoint.hasActive(session.id)).toBe(true)
+    // Completing a fold for a different (unknown) mark id keeps it active.
+    await ctx.checkpoint.completeFold(session.id, id - 1)
+    expect(await ctx.checkpoint.hasActive(session.id)).toBe(true)
+    // Completing the latest mark closes it.
+    await ctx.checkpoint.completeFold(session.id, id)
+    expect(await ctx.checkpoint.hasActive(session.id)).toBe(false)
   })
 
   it('injects the warning once per turn while a checkpoint is active', async () => {
     const ctx = await setupGuard()
     const session = Session.create(SessionId('guard-inject'))
     session.append('turn/start', { turn: 1 })
-    const mark = session.append('checkpoint/mark', { turn: 1 })
+    const { id } = await ctx.checkpoint.mark(session)
     const inject = vi.fn()
     const agent = { id: SessionId('guard-inject'), session, inject } as unknown as Agent
 
     ctx.emit('agent/turn-stopping', { agent, turn: 1, signal: SIGNAL })
-    expect(inject).toHaveBeenCalledTimes(1)
-    const message = inject.mock.calls[0]![0] as ReturnType<typeof createUserMessage>
+    await vi.waitFor(() => {
+      expect(inject).toHaveBeenCalledTimes(1)
+    })
+    const message = inject.mock.calls[0]![0] as Message
     expect(message.content).toEqual([{ type: 'text', text: REWIND_GUARD_TEXT }])
     expect(message.source).toEqual(REWIND_GUARD_SOURCE)
 
     // A second stop attempt in the same turn is not warned again — a rewind
     // that legitimately fails must not trap the turn in a warning loop.
     ctx.emit('agent/turn-stopping', { agent, turn: 1, signal: SIGNAL })
-    expect(inject).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => {
+      expect(inject).toHaveBeenCalledTimes(1)
+    })
 
     // After the mark is folded, a later turn stops quietly.
-    session.append('checkpoint/rewind', {
-      turn: 1,
-      report: 'fold',
-      checkpointSeq: mark.seq,
-      shadowedRange: { start: 0, end: 0 },
-      shadowedSeqs: [],
-      provider: MODEL,
-      model: MODEL,
-    })
+    await ctx.checkpoint.completeFold(session.id, id)
     ctx.emit('agent/turn-stopping', { agent, turn: 2, signal: SIGNAL })
-    expect(inject).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => {
+      expect(inject).toHaveBeenCalledTimes(1)
+    })
   })
 })

@@ -60,7 +60,7 @@ export function apply(ctx: Context, config: ToolConfig): void {
         type: 'object',
         additionalProperties: false,
         properties: {
-          checkpointSeq: { type: 'integer', required: true },
+          markId: { type: 'integer', required: true },
           foldedNodes: { type: 'integer', required: true },
           start: { type: 'integer', required: true },
           end: { type: 'integer', required: true },

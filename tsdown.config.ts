@@ -2,7 +2,7 @@ import type { UserConfig } from 'tsdown'
 
 export default {
   name: '@dpskh/tool-rewind',
-  entry: ['lib/types/index.js', 'lib/types/invariant.js'],
+  entry: ['lib/types/index.js'],
   outDir: 'lib',
   format: 'esm',
   platform: 'node',

@@ -5,33 +5,33 @@
  * exploration's surface range with the report — the same `surfaceOp:
  * { op: 'replace' }` mechanism the compaction seam uses — so subsequent
  * requests no longer carry the exploration's intermediate steps, while the
- * durable log keeps the full exploration for audit. Consumes `ctx.llm` for
- * the report and the compaction seam's exported pair-balance helpers; never
- * modifies upstream packages.
+ * durable log keeps the full exploration for audit.
+ *
+ * Marks are owned by `@dpskh/tool-checkpoint` and consumed exclusively
+ * through `ctx.checkpoint` (`latestMark` / `hasActive` / `completeFold`);
+ * this plugin writes no session events of its own — the fold commits only
+ * the core-vocabulary `user/message` replacement, so the durable log stays
+ * readable by any harness. Consumes `ctx.llm` for the report and the
+ * compaction seam's exported pair-balance helpers; never modifies upstream
+ * packages.
  *
  * @module @dpskh/tool-rewind
  */
 
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { CheckpointService } from '@dpskh/tool-checkpoint'
 import * as toolPlugin from './tool.ts'
-
-// Re-export pulls the declaration-merged event map into every consumer
-// program (the dsh-compact pattern): importing this package is what makes
-// the 'checkpoint/*' events visible to `Session.append` and `SessionEvent`.
-export type { CheckpointRewindEvent } from './types.ts'
 
 import { REWIND_REPORT_SOURCE } from './brand.ts'
 import { installRewindGuard } from './guard.ts'
 import {
   RewindError,
-  assertNoActiveFold,
-  assertRegionUnchanged,
-  findLatestMark,
-  openTurnOf,
   selectFoldRegion,
+  assertRegionUnchanged,
 } from './region.ts'
 import {
   buildSummarizationInput,
@@ -48,8 +48,8 @@ declare module '@deepseek-ai/cordis' {
 
 /** One settled fold, as reported to the caller. */
 export interface RewindResult {
-  /** Seq of the `checkpoint/mark` the fold started after. */
-  checkpointSeq: number
+  /** Id of the `checkpoint/mark` the fold started after. */
+  markId: number
   /** Number of surface nodes folded into the report. */
   foldedNodes: number
   /** Inclusive first folded surface-node seq. */
@@ -64,19 +64,24 @@ export interface RewindResult {
 
 /**
  * The exploration-fold service, registered as `ctx.rewind`. One instance per
- * context; the verb runs the full fold transaction: find the latest mark,
- * select the balanced region, summarize it over `ctx.llm`, then commit the
- * replacement in one synchronous block. Failures leave the fold bracket open
- * with an error record (failed attempts remain visible in the log).
+ * context; the verb runs the full fold transaction: find the latest mark
+ * through `ctx.checkpoint`, select the balanced region, summarize it over
+ * `ctx.llm`, then commit the replacement in one synchronous block and stamp
+ * the mark folded. Failures write nothing — the region stays intact and the
+ * fold is retryable. A per-session in-process lock rejects concurrent folds
+ * (the old log-bracket lock no longer exists, since no fold events are
+ * written).
  */
 export class RewindService extends Service {
-  static inject = ['llm']
+  static inject = ['llm', 'checkpoint']
 
   private readonly maxTokens: number
   private readonly maxSummarizationRetries: number
   private readonly summarizationProvider: string | undefined
   private readonly summarizationModel: string | undefined
   private readonly reportLanguage: 'en' | 'zh'
+  /** Per-session fold lock: one in-flight fold per session. */
+  private readonly foldLocks = new Set<SessionId>()
 
   constructor(ctx: Context, config: Partial<RewindSummarizeConfig> = {}) {
     super(ctx, 'rewind')
@@ -100,17 +105,20 @@ export class RewindService extends Service {
    */
   async rewind(agent: Agent, signal: AbortSignal): Promise<RewindResult> {
     const session = agent.session
-    const events = session.events
-    const mark = findLatestMark(events)
+    const checkpoint: CheckpointService = this.ctx.checkpoint
+    const mark = await checkpoint.latestMark(session.id)
     if (mark === undefined) {
-      throw new RewindError('NO_CHECKPOINT', 'rewind: no checkpoint/mark found in the session; call `checkpoint` before exploring')
+      throw new RewindError('NO_CHECKPOINT', 'rewind: no checkpoint mark found for this session; call `checkpoint` before exploring')
     }
-    const region = selectFoldRegion(session, mark.seq)
-    assertNoActiveFold(events)
-    const turn = openTurnOf(events)
-    session.append('checkpoint/fold-start', { turn })
-    let closed = false
+    if (this.foldLocks.has(session.id)) {
+      throw new RewindError(
+        'FOLD_IN_PROGRESS',
+        'rewind: another fold is already in progress for this session',
+      )
+    }
+    this.foldLocks.add(session.id)
     try {
+      const region = selectFoldRegion(session, mark.logLength)
       const input = buildSummarizationInput(session, region)
       const summary = await summarizeRegion(this.ctx, input, agent, {
         maxTokens: this.maxTokens,
@@ -121,7 +129,7 @@ export class RewindService extends Service {
         reportLanguage: this.reportLanguage,
       }, signal)
       signal.throwIfAborted()
-      assertRegionUnchanged(session, mark.seq, region)
+      assertRegionUnchanged(session, mark.logLength, region)
       const foldedText = regionTextLength(input.messages)
       if (foldedText > 0 && summary.report.length >= foldedText) {
         throw new RewindError(
@@ -129,45 +137,27 @@ export class RewindService extends Service {
           `rewind summary (${summary.report.length} chars) is not smaller than the folded region (${foldedText} chars over ${region.shadowedSeqs.length} nodes)`,
         )
       }
-      // Synchronous commit: no await between the record and the bracket close.
-      const record = session.append('checkpoint/rewind', {
-        turn,
-        report: summary.report,
-        checkpointSeq: mark.seq,
-        shadowedRange: { start: region.start, end: region.end },
-        shadowedSeqs: [...region.shadowedSeqs],
-        provider: summary.provider,
-        model: summary.model,
-        ...summary.usage === undefined ? {} : { usage: summary.usage },
-      })
+      // Synchronous commit: the replacement lands, then the mark is stamped
+      // folded. Nothing between the append and the completeFold may throw
+      // after the append succeeded.
       session.append('user/message', createUserMessage({
         content: [{ type: 'text', text: summary.report }],
         source: REWIND_REPORT_SOURCE,
       }), {
         surfaceOp: { op: 'replace', start: region.start, end: region.end },
-        sourceEventSeqs: [record.seq, ...region.shadowedSeqs],
+        sourceEventSeqs: [...region.shadowedSeqs],
       })
-      session.append('checkpoint/fold-end', { turn })
-      closed = true
+      await checkpoint.completeFold(session.id, mark.id)
       return {
-        checkpointSeq: mark.seq,
+        markId: mark.id,
         foldedNodes: region.shadowedSeqs.length,
         start: region.start,
         end: region.end,
         foldedChars: foldedText,
         reportChars: summary.report.length,
       }
-    } catch (error) {
-      /* v8 ignore next 1 -- closed stays false on every throwing path: nothing after the commit block can throw */
-      if (!closed) {
-        try {
-          session.append('checkpoint/fold-end', { turn, error: errorChain(error) })
-        } catch {
-          // The bracket close itself failed; the unmatched fold-start stays
-          // detectable as a fold lock.
-        }
-      }
-      throw error
+    } finally {
+      this.foldLocks.delete(session.id)
     }
   }
 }
@@ -196,8 +186,8 @@ export const Config: z<Config> = z.object({
 /**
  * Compose the entry plugin: install the turn-ending fold guard, provide the
  * fold service, then mount the tool child plugin (which injects the service
- * it delegates to). The service activation is awaited — its `llm` inject
- * resolves asynchronously.
+ * it delegates to). The service activation is awaited — its `llm` and
+ * `checkpoint` injects resolve asynchronously.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
   installRewindGuard(ctx)
